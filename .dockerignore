@@ -1,0 +1,8 @@
+.git
+.venv
+.env
+output
+frontend/node_modules
+tests
+__pycache__
+

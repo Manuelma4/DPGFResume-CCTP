@@ -1,0 +1,53 @@
+name: dpgf-resume-cctp
+
+services:
+  dpgf-resume-cctp:
+    build: .
+    container_name: dpgf-resume-cctp
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8070:8070"
+    environment:
+      DPGF_ENVIRONMENT: ${DPGF_ENVIRONMENT:-production}
+      DPGF_AUTH_REQUIRED: ${DPGF_AUTH_REQUIRED:-true}
+      DPGF_PUBLIC_URL: ${DPGF_PUBLIC_URL:?DPGF_PUBLIC_URL is required}
+      DPGF_SESSION_SECRET: ${DPGF_SESSION_SECRET:?DPGF_SESSION_SECRET is required}
+      DPGF_SESSION_COOKIE_SECURE: ${DPGF_SESSION_COOKIE_SECURE:-true}
+      DPGF_SESSION_TTL_SECONDS: ${DPGF_SESSION_TTL_SECONDS:-28800}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?OIDC_ISSUER_URL is required}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-dpgf-resume-cctp}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?OIDC_CLIENT_SECRET is required}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:?OIDC_REDIRECT_URI is required}
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${OIDC_POST_LOGOUT_REDIRECT_URI:?OIDC_POST_LOGOUT_REDIRECT_URI is required}
+      OIDC_SCOPES: ${OIDC_SCOPES:-openid profile email}
+      OIDC_REQUIRED_GROUP: ${OIDC_REQUIRED_GROUP:-Moduo Access - DPGF Resume CCTP}
+      OIDC_HTTP_TIMEOUT: ${OIDC_HTTP_TIMEOUT:-12}
+      DPGF_USE_LLM: ${DPGF_USE_LLM:-false}
+      DPGF_LLM_TIMEOUT: ${DPGF_LLM_TIMEOUT:-180}
+      DPGF_MAX_FILE_MB: ${DPGF_MAX_FILE_MB:-80}
+      DPGF_MAX_DOCUMENTS: ${DPGF_MAX_DOCUMENTS:-30}
+      LIHA_CHAT_COMPLETIONS_URL: ${LIHA_CHAT_COMPLETIONS_URL:-}
+      LIHA_CHAT_MODEL: ${LIHA_CHAT_MODEL:-}
+      LIHA_CHAT_TOKEN: ${LIHA_CHAT_TOKEN:-}
+      LIHA_CHAT_TIMEOUT_SECONDS: ${LIHA_CHAT_TIMEOUT_SECONDS:-15}
+      LIHA_RULES_SUGGEST_TIMEOUT_SECONDS: ${LIHA_RULES_SUGGEST_TIMEOUT_SECONDS:-700}
+    volumes:
+      - dpgf_resume_data:/app/output
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8070/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  dpgf_resume_data:

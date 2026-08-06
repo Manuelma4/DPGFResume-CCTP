@@ -1,0 +1,10 @@
+fastapi==0.139.0
+uvicorn[standard]==0.51.0
+python-multipart==0.0.22
+openpyxl==3.1.5
+Pillow>=10.0,<13
+PyMuPDF==1.28.0
+python-docx==1.2.0
+httpx==0.28.1
+PyJWT[crypto]>=2.10,<3
+python-dotenv==1.2.2
