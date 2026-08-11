@@ -4,18 +4,26 @@ import tempfile
 import unittest
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 from zipfile import ZipFile
 
 import fitz
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
-from app import store
+from app import config, store
+from app import llm as llm_module
 from app.excel_export import export_analysis, export_analysis_files
 from app.extractors import extract_document
-from app.main import app
-from app.parser import parse_document, recompute_stats
+from app.main import _apply_perimeter_assist, _apply_unit_assist, app
+from app.parser import classify_lot_family, lot_sort_key, parse_document, recompute_stats
+
+# Tests must stay fast, deterministic and free of real network calls even
+# when a real LIHA token is configured in .env for the running app. Tests
+# that specifically exercise the LIHA-assisted paths mock app.llm directly.
+config.USE_LLM = False
 
 
 def make_docx(path: Path) -> None:
@@ -69,6 +77,103 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(by_code["3.2.9"]["unit"], "mois")
         self.assertIn("source_excerpt", by_code["3.2.1"])
 
+    def test_docx_word_toc_entries_are_not_extracted_as_headings(self) -> None:
+        # Word's automatic table of contents applies built-in "TOC N" styles
+        # and bakes the resolved page number into the plain text of each
+        # entry (e.g. "4.1.1 Ragréage 11"). Left unfiltered, real CCTP files
+        # produce a duplicate, page-number-suffixed phantom line for every
+        # real heading, positioned before the actual content.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 04 GROS OEUVRE.docx"
+            document = Document()
+            document.styles.add_style("TOC 1", WD_STYLE_TYPE.PARAGRAPH)
+            document.styles.add_style("TOC 3", WD_STYLE_TYPE.PARAGRAPH)
+            document.add_heading("LOT 04 — GROS OEUVRE", level=1)
+            document.add_paragraph("4. Description des ouvrages 11", style="TOC 1")
+            document.add_paragraph("4.1.1 Ragréage 11", style="TOC 3")
+            document.add_heading("4. Description des ouvrages", level=1)
+            document.add_heading("4.1 Travaux préparatoires", level=2)
+            document.add_heading("4.1.1 Ragréage", level=3)
+            document.add_paragraph("Fourniture et pose d'un ragréage autolissant.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_toc")
+
+        designations = [line["designation"] for line in lot["lines"]]
+        self.assertNotIn("Description des ouvrages 11", designations)
+        self.assertNotIn("Ragréage 11", designations)
+        self.assertIn("Ragréage", designations)
+        by_code = {line["code"]: line for line in lot["lines"]}
+        self.assertEqual(by_code["4.1.1"]["designation"], "Ragréage")
+
+    def test_docx_word_auto_numbered_headings_get_synthesized_codes(self) -> None:
+        # Many real CCTP use Word's native multilevel-list numbering, which
+        # is computed at render time and is absent from the paragraph's own
+        # text — only the Heading/Titre style survives extraction. The parser
+        # must still recover a usable hierarchy from the style levels alone.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 20 CARRELAGE.docx"
+            document = Document()
+            document.add_heading("LOT 20 — CARRELAGE", level=1)
+            document.add_heading("Description des ouvrages", level=1)
+            document.add_heading("Travaux préparatoires", level=2)
+            document.add_heading("Ragréage", level=3)
+            document.add_paragraph("Fourniture et mise en œuvre d'un ragréage.")
+            document.add_heading("Carrelage", level=2)
+            document.add_heading("Carrelage grès cérame 45 x 45", level=3)
+            document.add_paragraph("Fourniture et pose d'un carrelage grès cérame.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_style_numbering")
+
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Ragréage"]["code"], "1.1.1")
+        self.assertEqual(by_designation["Ragréage"]["kind"], "item")
+        self.assertEqual(
+            by_designation["Carrelage grès cérame 45 x 45"]["code"], "1.2.1"
+        )
+        self.assertEqual(lot["perimeter"]["method"], "explicit_anchor")
+
+    def test_curly_apostrophe_matches_straight_apostrophe_rules(self) -> None:
+        # Word CCTP text overwhelmingly types "d’étanchéité" with a curly
+        # apostrophe (’) while UNIT_RULES/DECOMPOSITION_RULES are written in
+        # this codebase with a straight one ('). A ml rule keyed on
+        # "releves? d'etancheite" must still fire against the curly form.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 08 COUVERTURE.docx"
+            document = Document()
+            document.add_heading("LOT 08 — COUVERTURE ETANCHEITE", level=1)
+            document.add_heading("Description des ouvrages", level=1)
+            document.add_heading("Relevés d’étanchéité", level=2)
+            document.add_paragraph("Relevés d’étanchéité en périphérie de toiture.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_apostrophe_unit")
+
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Relevés d’étanchéité"]["unit"], "ml")
+
+    def test_curly_apostrophe_prevents_duplicate_decomposition_line(self) -> None:
+        # Same bug, but for the decomposition dedup check: the CCTP writes
+        # out "Vanne d’isolement DN 15" (curly apostrophe) explicitly as its
+        # own line, while the DECOMPOSITION_RULES child constant is written
+        # "Vanne d'isolement DN 15" (straight). Before the _normalized() fix
+        # this mismatch made the dedup check blind to the duplicate.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 16 PLOMBERIE.docx"
+            document = Document()
+            document.add_heading("LOT 16 — PLOMBERIE", level=1)
+            document.add_heading("Description des ouvrages", level=1)
+            document.add_heading("Vanne d’isolement", level=2)
+            document.add_paragraph("Vanne à boisseau sphérique.")
+            document.add_heading("Vanne d’isolement DN 15", level=2)
+            document.add_paragraph("Section courante DN 15, quantité 4 U.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_apostrophe_dedup")
+
+        matches = [
+            line for line in lot["lines"] if line["designation"] == "Vanne d’isolement DN 15"
+        ]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["origin"], "deterministic-v2")
+
     def test_pdf_page_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "LOT 08 ELECTRICITE.pdf"
@@ -118,6 +223,158 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(by_code["3.1"]["unit"], "U")
         self.assertFalse(by_code["3.2"]["included"])
         self.assertEqual(lot["perimeter"]["method"], "explicit_anchor")
+
+    def test_unit_rules_match_real_dpgf_vocabulary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 06 SERRURERIE.docx"
+            document = Document()
+            document.add_heading("LOT 06 — SERRURERIE", level=1)
+            document.add_heading("6.1 OUVRAGES", level=2)
+            document.add_heading("6.1.1 Garde-corps à barreaudage", level=3)
+            document.add_paragraph("Fourniture et pose en acier galvanisé thermolaqué.")
+            document.add_heading("6.1.2 Sprinkler", level=3)
+            document.add_paragraph("Tête de sprinkler montante, fourniture et pose.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_units")
+
+        by_code = {line["code"]: line for line in lot["lines"]}
+        # Mined from real Moduo DPGF: garde-corps is overwhelmingly billed per
+        # ml, not per unit as the previous keyword list assumed.
+        self.assertEqual(by_code["6.1.1"]["unit"], "ml")
+        self.assertEqual(by_code["6.1.2"]["unit"], "U")
+
+    def test_unit_override_beats_generic_group(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 16 PLOMBERIE.docx"
+            document = Document()
+            document.add_heading("LOT 16 — PLOMBERIE", level=1)
+            document.add_heading("16.1 OUVRAGES", level=2)
+            document.add_heading("16.1.1 Isolation acoustique", level=3)
+            document.add_paragraph("Traitement acoustique forfaitaire du local technique.")
+            document.add_heading("16.1.2 Vanne d'isolement", level=3)
+            document.add_paragraph("Vanne à boisseau sphérique, fourniture et pose.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_override")
+
+        by_code = {line["code"]: line for line in lot["lines"]}
+        # "isolation" alone defaults to m² (surface work), but real DPGF data
+        # shows "isolation acoustique" is billed as a lump-sum Ens package.
+        self.assertEqual(by_code["16.1.1"]["unit"], "Ens")
+        self.assertEqual(by_code["16.1.2"]["unit"], "U")
+
+    def test_unit_depends_on_lot_family_for_ambiguous_words(self) -> None:
+        # "câblage" is globally ambiguous (49-73% either way across trades in
+        # the real corpus) but pure within a single trade: ~ml in VRD (buried
+        # cable trenches, billed by length) vs ~Ens in électricité (a lump
+        # cabling package). Same keyword, different lot, different unit.
+        with tempfile.TemporaryDirectory() as directory:
+            vrd_path = Path(directory) / "CCTP LOT 02 VRD.docx"
+            vrd_doc = Document()
+            vrd_doc.add_heading("LOT 02 — VRD", level=1)
+            vrd_doc.add_heading("2.1 DESCRIPTION DES OUVRAGES", level=2)
+            vrd_doc.add_heading("2.1.1 Câblage basse tension", level=3)
+            vrd_doc.add_paragraph("Câblage enterré en tranchée commune.")
+            vrd_doc.save(vrd_path)
+            vrd_lot = parse_document(extract_document(vrd_path), "src_vrd")
+
+            elec_path = Path(directory) / "CCTP LOT 14 ELECTRICITE.docx"
+            elec_doc = Document()
+            elec_doc.add_heading("LOT 14 — ELECTRICITE CFO/CFA", level=1)
+            elec_doc.add_heading("14.1 DESCRIPTION DES OUVRAGES", level=2)
+            elec_doc.add_heading("14.1.1 Câblage basse tension", level=3)
+            elec_doc.add_paragraph("Câblage des équipements terminaux.")
+            elec_doc.save(elec_path)
+            elec_lot = parse_document(extract_document(elec_path), "src_elec")
+
+        vrd_item = next(
+            line for line in vrd_lot["lines"] if line["designation"] == "Câblage basse tension"
+        )
+        elec_item = next(
+            line for line in elec_lot["lines"] if line["designation"] == "Câblage basse tension"
+        )
+        self.assertEqual(vrd_item["unit"], "ml")
+        self.assertEqual(elec_item["unit"], "Ens")
+
+    def test_decomposition_rule_adds_flagged_extra_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 15 CVC.docx"
+            document = Document()
+            document.add_heading("LOT 15 — CVC", level=1)
+            document.add_heading("15.1 DESCRIPTION DES OUVRAGES", level=2)
+            document.add_heading("15.1.1 Tube cuivre", level=3)
+            document.add_paragraph(
+                "Fourniture et pose de tube cuivre pour l'ensemble des réseaux."
+            )
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_decomp")
+
+        designations = {line["designation"]: line for line in lot["lines"]}
+        self.assertIn("Tube cuivre diam. 12/14", designations)
+        extra = designations["Tube cuivre diam. 12/14"]
+        self.assertEqual(extra["origin"], "rule-derived")
+        self.assertEqual(extra["review_status"], "to_review")
+        self.assertIsNone(extra["quantity"])
+        self.assertIn("implique", extra["review_reason"])
+        # The CCTP-derived line itself is untouched.
+        self.assertEqual(designations["Tube cuivre"]["origin"], "deterministic-v2")
+
+    def test_second_wave_decomposition_rules_fire(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 16 PLOMBERIE.docx"
+            document = Document()
+            document.add_heading("LOT 16 — PLOMBERIE", level=1)
+            document.add_heading("Description des ouvrages", level=1)
+            document.add_heading("Stérilisation du réseau", level=2)
+            document.add_paragraph("Stérilisation complète du réseau d'eau potable.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_second_wave")
+
+        designations = {line["designation"] for line in lot["lines"]}
+        self.assertIn("Repérage étiquetage", designations)
+        self.assertIn("Analyse d'eau", designations)
+
+    def test_decomposition_rule_skips_variant_already_written_in_cctp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 15 CVC.docx"
+            document = Document()
+            document.add_heading("LOT 15 — CVC", level=1)
+            document.add_heading("15.1 DESCRIPTION DES OUVRAGES", level=2)
+            document.add_heading("15.1.1 Tube cuivre", level=3)
+            document.add_paragraph("Fourniture et pose de tube cuivre.")
+            document.add_heading("15.1.2 Tube cuivre diam. 12/14", level=3)
+            document.add_paragraph("Section courante en diamètre 12/14, quantité 30 ml.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_decomp_dup")
+
+        matches = [
+            line
+            for line in lot["lines"]
+            if line["designation"] == "Tube cuivre diam. 12/14"
+        ]
+        # Written explicitly in the CCTP: the rule must not duplicate it.
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["origin"], "deterministic-v2")
+
+    def test_lot_family_breaks_ties_when_codes_collide(self) -> None:
+        self.assertEqual(classify_lot_family("LOT 03 — ELECTRICITE CFO/CFA")[0], "electricite")
+        self.assertEqual(classify_lot_family("LOT 03 — GROS OEUVRE")[0], "fondations_gros_oeuvre")
+        electricite = {"code": "03", "title": "LOT 03 — ELECTRICITE CFO/CFA"}
+        gros_oeuvre = {"code": "03", "title": "LOT 03 — GROS OEUVRE"}
+        # Same code from two independently numbered CCTP: gros œuvre still
+        # comes before the technical lots in the merged workbook.
+        ordered = sorted([electricite, gros_oeuvre], key=lot_sort_key)
+        self.assertEqual([lot["title"] for lot in ordered], [gros_oeuvre["title"], electricite["title"]])
+        # A project with its own coherent, distinct numbering is untouched.
+        self.assertEqual(
+            sorted(
+                [
+                    {"code": "12", "title": "LOT 12 — ELECTRICITE"},
+                    {"code": "03", "title": "LOT 03 — GROS OEUVRE"},
+                ],
+                key=lot_sort_key,
+            )[0]["code"],
+            "03",
+        )
 
 
 class ExcelTests(unittest.TestCase):
@@ -456,6 +713,144 @@ class ApiFlowTests(unittest.TestCase):
             self.assertEqual(tco.json()["schema_version"], "1.0")
         finally:
             client.delete(f"/api/v1/analyses/{analysis_id}")
+
+
+class LlmAssistTests(unittest.TestCase):
+    """LIHA is opt-in (config.USE_LLM=False for the whole suite, see top of
+    this file) and none of these tests hit the network: app.llm functions are
+    mocked directly."""
+
+    def test_perimeter_assist_recovers_from_wrong_dominant_chapter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 08 COUVERTURE.docx"
+            document = Document()
+            document.add_heading("LOT 08 — COUVERTURE", level=1)
+            # Chapter 2 (administrative) has 3 leaves, chapter 3 (the real
+            # priceable works) has only 2 — the dominant-chapter heuristic
+            # picks chapter 2 by sheer count, which is wrong.
+            document.add_heading("2. GENERALITES", level=1)
+            document.add_heading("2.1 Documents de référence", level=2)
+            document.add_paragraph("Liste des documents applicables.")
+            document.add_heading("2.2 Normes", level=2)
+            document.add_paragraph("Liste des normes applicables.")
+            document.add_heading("2.3 Prescriptions communes", level=2)
+            document.add_paragraph("Prescriptions générales du marché.")
+            document.add_heading("3. TRAVAUX DE COUVERTURE", level=1)
+            document.add_heading("3.1 Ragréage", level=2)
+            document.add_paragraph("Fourniture et mise en oeuvre d'un ragréage.")
+            document.add_heading("3.2 Carrelage", level=2)
+            document.add_paragraph("Fourniture et pose d'un carrelage.")
+            document.save(path)
+            extracted = extract_document(path)
+            lot = parse_document(extracted, "src_perimeter")
+
+        self.assertEqual(lot["perimeter"]["method"], "dominant_numbered_chapter")
+        self.assertEqual(lot["perimeter"]["anchor_code"], "2")
+
+        with patch.object(
+            llm_module, "suggest_perimeter_anchor", return_value="3"
+        ) as mock_suggest:
+            new_lot, used = _apply_perimeter_assist(extracted, "src_perimeter", lot)
+
+        mock_suggest.assert_called_once()
+        self.assertTrue(used)
+        self.assertEqual(new_lot["perimeter"]["method"], "llm_confirmed_anchor")
+        designations = {line["designation"] for line in new_lot["lines"]}
+        self.assertIn("Ragréage", designations)
+        self.assertNotIn("Documents de référence", designations)
+
+    def test_perimeter_assist_skips_already_strong_perimeter(self) -> None:
+        lot = {"perimeter": {"method": "explicit_anchor"}, "lines": [], "title": "x"}
+        with patch.object(llm_module, "suggest_perimeter_anchor") as mock_suggest:
+            new_lot, used = _apply_perimeter_assist(object(), "src", lot)
+        mock_suggest.assert_not_called()
+        self.assertFalse(used)
+        self.assertIs(new_lot, lot)
+
+    def test_perimeter_assist_rejects_anchor_that_yields_no_items(self) -> None:
+        # The confirmed anchor is a real candidate but happens to have no
+        # further numbered breakdown in this document — the forced re-parse
+        # comes back with zero priceable items. Keep the original result
+        # instead of silently replacing it with an empty one.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 09 MENUISERIES.docx"
+            document = Document()
+            document.add_heading("LOT 09 — MENUISERIES", level=1)
+            document.add_heading("2. GENERALITES", level=1)
+            document.add_heading("2.1 Documents de référence", level=2)
+            document.add_paragraph("Liste des documents.")
+            document.add_heading("2.2 Normes", level=2)
+            document.add_paragraph("Liste des normes.")
+            document.add_heading("3. TRAVAUX", level=1)
+            document.add_paragraph("Paragraphe sans sous-titre numéroté.")
+            document.save(path)
+            extracted = extract_document(path)
+            lot = parse_document(extracted, "src_empty_anchor")
+
+        self.assertEqual(lot["perimeter"]["method"], "dominant_numbered_chapter")
+        original_items = sum(1 for line in lot["lines"] if line["kind"] == "item")
+
+        with patch.object(llm_module, "suggest_perimeter_anchor", return_value="3"):
+            new_lot, used = _apply_perimeter_assist(extracted, "src_empty_anchor", lot)
+
+        self.assertFalse(used)
+        self.assertIs(new_lot, lot)
+        self.assertEqual(
+            sum(1 for line in new_lot["lines"] if line["kind"] == "item"), original_items
+        )
+
+    def test_unit_assist_fills_default_without_touching_rule_based_units(self) -> None:
+        lot = {
+            "lines": [
+                {
+                    "id": "a",
+                    "kind": "item",
+                    "designation": "Robinet de puisage",
+                    "unit": "U",
+                    "unit_source": "rule",
+                },
+                {
+                    "id": "b",
+                    "kind": "item",
+                    "designation": "Traitement de surface spécifique",
+                    "unit": "Ens",
+                    "unit_source": "default",
+                },
+            ]
+        }
+        with patch.object(
+            llm_module, "suggest_units", return_value={"b": "m²"}
+        ) as mock_suggest:
+            used = _apply_unit_assist(lot)
+
+        mock_suggest.assert_called_once_with(
+            [{"code": "b", "designation": "Traitement de surface spécifique"}]
+        )
+        self.assertTrue(used)
+        by_id = {line["id"]: line for line in lot["lines"]}
+        self.assertEqual(by_id["a"]["unit"], "U")
+        self.assertEqual(by_id["a"]["unit_source"], "rule")
+        self.assertEqual(by_id["b"]["unit"], "m²")
+        self.assertEqual(by_id["b"]["unit_source"], "llm")
+        self.assertEqual(by_id["b"]["unit_confidence"], 0.7)
+
+    def test_suggest_perimeter_anchor_ignores_code_outside_candidates(self) -> None:
+        with patch.object(llm_module, "available", return_value=True), patch.object(
+            llm_module, "_chat_completion", return_value='{"anchor_code": "99"}'
+        ):
+            result = llm_module.suggest_perimeter_anchor(
+                [{"code": "3", "title": "Travaux", "level": 1}], "LOT 08"
+            )
+        self.assertIsNone(result)
+
+    def test_suggest_units_ignores_invalid_unit_and_unknown_code(self) -> None:
+        with patch.object(llm_module, "available", return_value=True), patch.object(
+            llm_module,
+            "_chat_completion",
+            return_value='{"units": {"a": "litres", "zzz": "U"}}',
+        ):
+            result = llm_module.suggest_units([{"code": "a", "designation": "Foo"}])
+        self.assertEqual(result, {})
 
 
 if __name__ == "__main__":

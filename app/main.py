@@ -30,7 +30,12 @@ from .excel_export import (
     safe_export_archive_name,
 )
 from .extractors import extract_document
-from .parser import lot_sort_key, parse_document, recompute_stats
+from .parser import (
+    list_heading_candidates,
+    lot_sort_key,
+    parse_document,
+    recompute_stats,
+)
 
 
 app = FastAPI(
@@ -98,6 +103,73 @@ async def _save_upload(upload: UploadFile, destination: Path) -> tuple[int, str]
     finally:
         await upload.close()
     return size, digest.hexdigest()
+
+
+_WEAK_PERIMETER_METHODS = {"dominant_numbered_chapter", "not_found"}
+
+
+def _apply_perimeter_assist(
+    extracted: Any, source_id: str, lot: dict[str, Any]
+) -> tuple[dict[str, Any], bool]:
+    """When the deterministic perimeter heuristics fell back to their
+    weakest methods, ask LIHA to pick the right chapter from the heading
+    list alone (cheap: no document text sent) and re-parse deterministically
+    with that anchor forced. This is only ever called once the deterministic
+    result already signalled low confidence, and `suggest_perimeter_anchor`
+    can only return a code that is actually present among the candidates
+    (never an invented one) — so a valid answer is trusted directly. A
+    "keep only if it finds more items" check was tried and rejected: the
+    correct chapter can legitimately have fewer headings than the wrong
+    (administrative) one that the heuristic picked instead."""
+    method = str((lot.get("perimeter") or {}).get("method") or "")
+    if method not in _WEAK_PERIMETER_METHODS:
+        return lot, False
+    candidates = list_heading_candidates(extracted)
+    anchor_code = llm.suggest_perimeter_anchor(candidates, str(lot.get("title") or ""))
+    if not anchor_code:
+        return lot, False
+    retried = parse_document(extracted, source_id, forced_anchor_code=anchor_code)
+    retried_items = sum(1 for line in retried.get("lines", []) if line.get("kind") == "item")
+    if retried_items == 0:
+        # The confirmed anchor exists among the candidates but the forced
+        # re-parse still yields no priceable item (e.g. the chapter has no
+        # further numbered breakdown in this particular document) — keep the
+        # original, weaker-but-non-empty result rather than replace it with
+        # nothing.
+        return lot, False
+    return retried, True
+
+
+def _apply_unit_assist(lot: dict[str, Any]) -> bool:
+    """Ask LIHA for a unit only on the lines UNIT_RULES could not classify
+    (unit_source == "default"), sending just code+designation per line — not
+    the whole document. Never overrides a unit that already came from an
+    explicit CCTP mention or a keyword rule."""
+    default_lines = [
+        line
+        for line in lot.get("lines", [])
+        if line.get("kind") == "item" and line.get("unit_source") == "default"
+    ]
+    if not default_lines:
+        return False
+    items = [
+        {"code": line["id"], "designation": line.get("designation")}
+        for line in default_lines
+    ]
+    suggestions = llm.suggest_units(items)
+    if not suggestions:
+        return False
+    by_id = {line["id"]: line for line in default_lines}
+    applied = False
+    for line_id, unit in suggestions.items():
+        line = by_id.get(line_id)
+        if line is None:
+            continue
+        line["unit"] = unit
+        line["unit_source"] = "llm"
+        line["unit_confidence"] = 0.7
+        applied = True
+    return applied
 
 
 def _merge_llm_result(
@@ -204,6 +276,8 @@ def process_analysis(
         lots: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
         llm_used = False
+        llm_perimeter_assist_used = False
+        llm_unit_assist_used = False
         documents = analysis.get("documents") or []
         for index, source in enumerate(documents):
             path = store.source_directory(analysis_id) / source["stored_name"]
@@ -215,6 +289,18 @@ def process_analysis(
                 lot = parse_document(extracted, source["id"])
                 if llm.available() and extracted.character_count:
                     try:
+                        lot, perimeter_assisted = _apply_perimeter_assist(
+                            extracted, source["id"], lot
+                        )
+                        if perimeter_assisted:
+                            llm_perimeter_assist_used = True
+                    except Exception as exc:
+                        lot.setdefault("warnings", []).append(
+                            f"Assistance LIHA (périmètre) indisponible : "
+                            f"{type(exc).__name__}. L'extraction déterministe a été "
+                            "conservée."
+                        )
+                    try:
                         refined = llm.refine(extracted.text, lot)
                         lot = _merge_llm_result(lot, refined)
                         llm_used = True
@@ -222,6 +308,15 @@ def process_analysis(
                         lot.setdefault("warnings", []).append(
                             f"Assistance LIHA indisponible : {type(exc).__name__}. "
                             "L'extraction déterministe a été conservée."
+                        )
+                    try:
+                        if _apply_unit_assist(lot):
+                            llm_unit_assist_used = True
+                    except Exception as exc:
+                        lot.setdefault("warnings", []).append(
+                            f"Assistance LIHA (unité) indisponible : "
+                            f"{type(exc).__name__}. Les unités par défaut ont été "
+                            "conservées."
                         )
                 if preserve_user_content:
                     lot = _restore_user_content(
@@ -263,6 +358,8 @@ def process_analysis(
         analysis["lots"] = lots
         analysis["warnings"] = warnings
         analysis["processing"]["llm_used"] = llm_used
+        analysis["processing"]["llm_perimeter_assist_used"] = llm_perimeter_assist_used
+        analysis["processing"]["llm_unit_assist_used"] = llm_unit_assist_used
         analysis["processing"]["method"] = (
             "deterministic+llm" if llm_used else "deterministic"
         )

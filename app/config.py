@@ -76,6 +76,10 @@ LIHA_MODEL = str(ENV.get("LIHA_CHAT_MODEL", "") or "").strip()
 LIHA_TOKEN = str(ENV.get("LIHA_CHAT_TOKEN", "") or "").strip()
 LLM_TIMEOUT = float(ENV.get("DPGF_LLM_TIMEOUT", "180") or 180)
 LLM_MAX_CHARS = int(ENV.get("DPGF_LLM_MAX_CHARS", "65000") or 65000)
+# Timeout séparé pour les assistances ciblées (confirmation de périmètre,
+# suggestion d'unité) : prompts courts, doivent rester rapides même si
+# refine() (document entier) a un budget plus large.
+LLM_SUGGEST_TIMEOUT = float(ENV.get("LIHA_RULES_SUGGEST_TIMEOUT_SECONDS", "60") or 60)
 
 MAX_FILE_BYTES = int(float(ENV.get("DPGF_MAX_FILE_MB", "80") or 80) * 1024 * 1024)
 MAX_DOCUMENTS = int(ENV.get("DPGF_MAX_DOCUMENTS", "30") or 30)

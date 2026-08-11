@@ -233,6 +233,18 @@ def _iter_docx_blocks(parent: DocumentObject) -> Iterable[Paragraph | Table]:
             yield Table(child, parent)
 
 
+def _is_toc_style(style_name: str) -> bool:
+    # Word's automatic table-of-contents field applies built-in "TOC 1".."TOC 9"
+    # paragraph styles (the underlying styleId stays this canonical English
+    # name even in a French install). Each entry's plain text is the heading
+    # title with its page number appended (the dot leader is a tab, not
+    # literal dots), so left unfiltered these are indistinguishable from real
+    # numbered headings and get extracted as duplicate, page-number-suffixed
+    # phantom items ahead of the real content.
+    normalized = style_name.strip().casefold()
+    return bool(re.match(r"^toc\s*\d*$", normalized))
+
+
 def extract_docx(path: Path) -> ExtractedDocument:
     document = Document(path)
     blocks: list[TextBlock] = []
@@ -240,6 +252,9 @@ def extract_docx(path: Path) -> ExtractedDocument:
     order = 0
     for element in _iter_docx_blocks(document):
         if isinstance(element, Paragraph):
+            style_name = str(element.style.name if element.style else "")
+            if _is_toc_style(style_name):
+                continue
             text = _clean_text(element.text)
             if not text:
                 continue
@@ -255,7 +270,7 @@ def extract_docx(path: Path) -> ExtractedDocument:
                     text=text,
                     page=None,
                     order=order,
-                    style=str(element.style.name if element.style else ""),
+                    style=style_name,
                     font_size=max(sizes, default=0.0),
                     bold=bool(runs)
                     and sum(1 for run in runs if run.bold) >= len(runs) / 2,
