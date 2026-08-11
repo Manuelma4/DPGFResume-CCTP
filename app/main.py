@@ -24,7 +24,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, auth, config, llm, store
+from . import __version__, auth, config, directory, llm, store
 from .excel_export import (
     export_analysis_files,
     safe_export_archive_name,
@@ -69,22 +69,27 @@ def _user(request: Request) -> auth.UserIdentity:
 
 
 def _analysis(analysis_id: str, user: auth.UserIdentity) -> dict[str, Any]:
-    # DPGF Résumé CCTP is a shared team tool: any authenticated user with app
-    # access can view any analysis. Edit permission is checked separately by
-    # _require_edit() in the handlers that actually mutate something.
-    del user
+    # DPGF Résumé CCTP is opt-in shared: an analysis is only readable by its
+    # owner, someone it was explicitly shared with, or someone whose role
+    # already grants them edit rights (see _can_view). Everyone else gets a
+    # 403, even to just GET it.
     try:
-        return store.get_analysis(analysis_id)
+        analysis = store.get_analysis(analysis_id)
     except store.InvalidAnalysisId as exc:
         raise HTTPException(400, str(exc)) from exc
     except store.AnalysisNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
+    _require_view(analysis, user)
+    return analysis
 
 
 _EDITOR_ROLES = {"Admin", "Copil"}
 
 
-def _can_edit_owner(owner_sub: str, user: auth.UserIdentity) -> bool:
+def _can_manage_sharing(owner_sub: str, user: auth.UserIdentity) -> bool:
+    # Owning the analysis, or holding an elevated app role, lets you both
+    # edit it AND decide who else gets access — a plain "edit" share does
+    # not grant the right to re-share (no permission escalation by chaining).
     owner_sub = str(owner_sub or "")
     return bool(
         (owner_sub and user.sub == owner_sub)
@@ -93,15 +98,55 @@ def _can_edit_owner(owner_sub: str, user: auth.UserIdentity) -> bool:
     )
 
 
+def _shared_permission(
+    analysis: dict[str, Any], user: auth.UserIdentity
+) -> str | None:
+    email = str(user.email or "").strip().lower()
+    if not email:
+        return None
+    share = store.get_share(str(analysis.get("id") or ""), email)
+    return str(share["permission"]) if share else None
+
+
 def _can_edit(analysis: dict[str, Any], user: auth.UserIdentity) -> bool:
-    return _can_edit_owner(str((analysis.get("owner") or {}).get("sub") or ""), user)
+    owner_sub = str((analysis.get("owner") or {}).get("sub") or "")
+    return _can_manage_sharing(owner_sub, user) or _shared_permission(
+        analysis, user
+    ) == "edit"
+
+
+def _can_view(analysis: dict[str, Any], user: auth.UserIdentity) -> bool:
+    # Being able to edit implies being able to read — you must load the
+    # analysis before you can save changes to it — so this stays a superset
+    # of _can_edit rather than a separate independent check.
+    return _can_edit(analysis, user) or _shared_permission(analysis, user) in {
+        "view",
+        "edit",
+    }
 
 
 def _require_edit(analysis: dict[str, Any], user: auth.UserIdentity) -> None:
     if not _can_edit(analysis, user):
         raise HTTPException(
             403,
-            "Seul le propriétaire ou un rôle Admin/Copil peut modifier cette analyse.",
+            "Vous n'avez pas les droits d'édition sur cette analyse.",
+        )
+
+
+def _require_view(analysis: dict[str, Any], user: auth.UserIdentity) -> None:
+    if not _can_view(analysis, user):
+        raise HTTPException(
+            403,
+            "Cette analyse ne vous a pas été partagée.",
+        )
+
+
+def _require_manage_sharing(analysis: dict[str, Any], user: auth.UserIdentity) -> None:
+    owner_sub = str((analysis.get("owner") or {}).get("sub") or "")
+    if not _can_manage_sharing(owner_sub, user):
+        raise HTTPException(
+            403,
+            "Seul le propriétaire ou un rôle Admin/Copil peut gérer le partage.",
         )
 
 
@@ -633,9 +678,14 @@ def reprocess_analysis(
 @app.get("/api/v1/analyses")
 def analyses(request: Request, search: str = ""):
     user = _user(request)
-    items = store.list_analyses(search)
+    items = store.list_analyses(
+        search, owner_sub=user.sub, viewer_email=str(user.email or "").lower()
+    )
     for item in items:
-        item["can_edit"] = _can_edit_owner(str(item.get("owner_sub") or ""), user)
+        owner_sub = str(item.get("owner_sub") or "")
+        shared_permission = item.get("shared_permission")
+        item["can_edit"] = _can_manage_sharing(owner_sub, user) or shared_permission == "edit"
+        item["can_manage_sharing"] = _can_manage_sharing(owner_sub, user)
     return {"analyses": items}
 
 
@@ -644,7 +694,59 @@ def analysis_detail(analysis_id: str, request: Request):
     user = _user(request)
     analysis = _analysis(analysis_id, user)
     analysis["can_edit"] = _can_edit(analysis, user)
+    owner_sub = str((analysis.get("owner") or {}).get("sub") or "")
+    can_manage_sharing = _can_manage_sharing(owner_sub, user)
+    analysis["can_manage_sharing"] = can_manage_sharing
+    analysis["shares"] = store.list_shares(analysis_id) if can_manage_sharing else []
     return analysis
+
+
+@app.get("/api/v1/analyses/{analysis_id}/shares")
+def list_analysis_shares(analysis_id: str, request: Request):
+    user = _user(request)
+    analysis = _analysis(analysis_id, user)
+    _require_manage_sharing(analysis, user)
+    return {"shares": store.list_shares(analysis_id)}
+
+
+@app.put("/api/v1/analyses/{analysis_id}/shares")
+def update_analysis_shares(
+    analysis_id: str,
+    request: Request,
+    payload: dict[str, Any] = Body(...),
+):
+    user = _user(request)
+    analysis = _analysis(analysis_id, user)
+    _require_manage_sharing(analysis, user)
+    shares = payload.get("shares")
+    if not isinstance(shares, list):
+        raise HTTPException(422, "Le champ 'shares' doit être une liste")
+    try:
+        updated = store.replace_shares(analysis_id, shares, user.sub)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"shares": updated}
+
+
+@app.get("/api/v1/directory/users")
+def directory_users(request: Request, q: str = ""):
+    _user(request)
+    try:
+        members = directory.list_group_members()
+    except directory.DirectoryError as exc:
+        raise HTTPException(
+            503, f"Annuaire authentik indisponible : {exc}"
+        ) from exc
+    needle = str(q or "").strip().lower()
+    if needle:
+        members = [
+            member
+            for member in members
+            if needle in member["email"]
+            or needle in member["name"].lower()
+            or needle in member["username"].lower()
+        ]
+    return {"users": members}
 
 
 @app.put("/api/v1/analyses/{analysis_id}")

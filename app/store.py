@@ -79,6 +79,23 @@ def initialize() -> None:
             "CREATE INDEX IF NOT EXISTS idx_analyses_owner_updated "
             "ON analyses(owner_sub, updated_at DESC)"
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analysis_shares (
+                analysis_id TEXT NOT NULL,
+                email TEXT NOT NULL,
+                permission TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                shared_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (analysis_id, email)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_analysis_shares_email "
+            "ON analysis_shares(email)"
+        )
 
 
 def analysis_directory(analysis_id: str) -> Path:
@@ -140,6 +157,7 @@ def _summary(row: sqlite3.Row) -> dict[str, Any]:
         owner = json.loads(row["payload_json"]).get("owner") or {}
     except json.JSONDecodeError:
         pass
+    row_keys = row.keys()
     return {
         "id": row["id"],
         "project_name": row["project_name"],
@@ -159,6 +177,9 @@ def _summary(row: sqlite3.Row) -> dict[str, Any]:
         "has_export": bool(row["export_name"]),
         "owner_sub": row["owner_sub"],
         "owner_name": str(owner.get("name") or owner.get("email") or ""),
+        "shared_permission": row["shared_permission"]
+        if "shared_permission" in row_keys
+        else None,
     }
 
 
@@ -250,24 +271,95 @@ def get_analysis(analysis_id: str) -> dict[str, Any]:
     return _row_to_payload(row)
 
 
-def list_analyses(search: str = "") -> list[dict[str, Any]]:
-    # Visible to every authenticated user with app access — DPGF Résumé CCTP
-    # is a shared team tool, not per-user private storage. Write permission
-    # (owner or elevated role) is decided in app/main.py, not here.
-    parameters: list[Any] = []
-    query = "SELECT * FROM analyses"
+def list_analyses(
+    search: str = "", *, owner_sub: str = "", viewer_email: str = ""
+) -> list[dict[str, Any]]:
+    # A row is visible only to its owner or to someone it was explicitly
+    # shared with (see analysis_shares) — sharing is opt-in, decided by the
+    # owner/an admin per project, not automatic for every app user. Write
+    # permission on top of that is decided in app/main.py, not here.
+    viewer_email = str(viewer_email or "").strip().lower()
+    parameters: list[Any] = [viewer_email, owner_sub]
+    query = (
+        "SELECT a.*, s.permission AS shared_permission FROM analyses a "
+        "LEFT JOIN analysis_shares s "
+        "ON s.analysis_id = a.id AND s.email = ? "
+        "WHERE a.owner_sub = ? OR s.email IS NOT NULL"
+    )
     search = str(search or "").strip()
     if search:
         query += (
-            " WHERE project_name LIKE ? OR project_reference LIKE ? "
-            "OR client_name LIKE ?"
+            " AND (a.project_name LIKE ? OR a.project_reference LIKE ? "
+            "OR a.client_name LIKE ?)"
         )
         term = f"%{search}%"
         parameters.extend([term, term, term])
-    query += " ORDER BY updated_at DESC"
+    query += " ORDER BY a.updated_at DESC"
     with _connection() as connection:
         rows = connection.execute(query, parameters).fetchall()
     return [_summary(row) for row in rows]
+
+
+def list_shares(analysis_id: str) -> list[dict[str, Any]]:
+    analysis_id = validate_analysis_id(analysis_id)
+    with _connection() as connection:
+        rows = connection.execute(
+            "SELECT email, permission, name FROM analysis_shares "
+            "WHERE analysis_id = ? ORDER BY email",
+            (analysis_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_share(analysis_id: str, email: str) -> dict[str, Any] | None:
+    analysis_id = validate_analysis_id(analysis_id)
+    email = str(email or "").strip().lower()
+    if not email:
+        return None
+    with _connection() as connection:
+        row = connection.execute(
+            "SELECT email, permission, name FROM analysis_shares "
+            "WHERE analysis_id = ? AND email = ?",
+            (analysis_id, email),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def replace_shares(
+    analysis_id: str, shares: list[dict[str, Any]], shared_by: str
+) -> list[dict[str, Any]]:
+    analysis_id = validate_analysis_id(analysis_id)
+    get_analysis(analysis_id)  # raises AnalysisNotFound if missing
+    cleaned: list[tuple[str, str, str]] = []
+    seen_emails: set[str] = set()
+    for entry in shares:
+        if not isinstance(entry, dict):
+            continue
+        email = str(entry.get("email") or "").strip().lower()
+        permission = str(entry.get("permission") or "").strip().lower()
+        if not email or permission not in {"view", "edit"}:
+            raise ValueError(
+                f"Partage invalide : email et permission ('view' ou 'edit') requis"
+            )
+        if email in seen_emails:
+            continue
+        seen_emails.add(email)
+        cleaned.append((email, permission, str(entry.get("name") or "").strip()))
+    created_at = now_iso()
+    with _write_lock, _connection() as connection:
+        connection.execute(
+            "DELETE FROM analysis_shares WHERE analysis_id = ?", (analysis_id,)
+        )
+        connection.executemany(
+            "INSERT INTO analysis_shares "
+            "(analysis_id, email, permission, name, shared_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (analysis_id, email, permission, name, shared_by, created_at)
+                for email, permission, name in cleaned
+            ],
+        )
+    return list_shares(analysis_id)
 
 
 def update_analysis(
@@ -361,6 +453,10 @@ def delete_analysis(analysis_id: str) -> None:
     with _write_lock, _connection() as connection:
         connection.execute(
             "DELETE FROM analyses WHERE id = ?",
+            (analysis_id,),
+        )
+        connection.execute(
+            "DELETE FROM analysis_shares WHERE analysis_id = ?",
             (analysis_id,),
         )
     if directory.exists():

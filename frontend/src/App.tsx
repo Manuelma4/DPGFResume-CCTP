@@ -24,10 +24,12 @@ import {
   RefreshCw,
   Save,
   Search,
+  Share2,
   ShieldCheck,
   Sparkles,
   Trash2,
   UploadCloud,
+  UserPlus,
   X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -40,14 +42,18 @@ import {
   getAnalysis,
   getCurrentUser,
   listAnalyses,
+  listDirectoryUsers,
   reprocessAnalysis,
   saveAnalysis,
+  updateAnalysisShares,
 } from './api';
 import type {
   Analysis,
   AnalysisListItem,
+  AnalysisShare,
   AnalysisStatus,
   AuthUser,
+  DirectoryUser,
   DpgfLine,
   Lot,
 } from './types';
@@ -565,6 +571,129 @@ const emptyManualObject: ManualObjectDraft = {
   included: true,
 };
 
+function ShareModal({ analysis, onClose, onSaved }: {
+  analysis: Analysis;
+  onClose: () => void;
+  onSaved: (shares: AnalysisShare[]) => void;
+}) {
+  const [directoryUsers, setDirectoryUsers] = useState<DirectoryUser[]>([]);
+  const [directoryError, setDirectoryError] = useState('');
+  const [loadingDirectory, setLoadingDirectory] = useState(true);
+  const [query, setQuery] = useState('');
+  const [shares, setShares] = useState<AnalysisShare[]>(analysis.shares);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    listDirectoryUsers()
+      .then(setDirectoryUsers)
+      .catch((caught: unknown) => setDirectoryError(caught instanceof Error ? caught.message : 'Annuaire indisponible'))
+      .finally(() => setLoadingDirectory(false));
+  }, []);
+
+  const excludedEmails = useMemo(() => {
+    const emails = new Set(shares.map((share) => share.email));
+    if (analysis.owner?.email) emails.add(analysis.owner.email.toLowerCase());
+    return emails;
+  }, [shares, analysis.owner]);
+
+  const suggestions = useMemo(() => {
+    const term = query.trim().toLocaleLowerCase('fr');
+    if (!term) return [];
+    return directoryUsers
+      .filter((candidate) => !excludedEmails.has(candidate.email))
+      .filter((candidate) =>
+        candidate.email.includes(term)
+        || candidate.name.toLocaleLowerCase('fr').includes(term)
+        || candidate.username.toLocaleLowerCase('fr').includes(term))
+      .slice(0, 8);
+  }, [directoryUsers, query, excludedEmails]);
+
+  function addShare(candidate: DirectoryUser) {
+    setShares((current) => [...current, { email: candidate.email, name: candidate.name || candidate.username, permission: 'view' }]);
+    setQuery('');
+  }
+
+  function removeShare(email: string) {
+    setShares((current) => current.filter((share) => share.email !== email));
+  }
+
+  function setPermission(email: string, permission: 'view' | 'edit') {
+    setShares((current) => current.map((share) => share.email === email ? { ...share, permission } : share));
+  }
+
+  async function save() {
+    setSaving(true);
+    setError('');
+    try {
+      const updated = await updateAnalysisShares(analysis.id, shares);
+      onSaved(updated);
+      onClose();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Enregistrement du partage impossible');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="share-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-heading">
+          <span className="modal-icon"><Share2 /></span>
+          <div><p className="eyebrow">Accès au dossier</p><h3>Partager « {analysis.project.name} »</h3><p>Choisissez qui peut voir ou modifier ce dossier.</p></div>
+          <button type="button" onClick={onClose}><X /></button>
+        </div>
+        <div className="share-search">
+          <label className="search-box compact">
+            <Search size={16} />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={loadingDirectory ? 'Chargement de l’annuaire…' : 'Rechercher un nom ou un email…'}
+              disabled={loadingDirectory || !!directoryError}
+            />
+          </label>
+          {directoryError && <div className="inline-alert error"><AlertCircle size={16} />{directoryError}</div>}
+          {suggestions.length > 0 && (
+            <ul className="share-suggestions">
+              {suggestions.map((candidate) => (
+                <li key={candidate.email}>
+                  <button type="button" onClick={() => addShare(candidate)}>
+                    <UserPlus size={15} />
+                    <span><strong>{candidate.name || candidate.username}</strong><small>{candidate.email}</small></span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="share-list">
+          {shares.length === 0 && <p className="share-empty">Ce dossier n'est partagé avec personne pour l'instant.</p>}
+          {shares.map((share) => (
+            <div className="share-row" key={share.email}>
+              <span><strong>{share.name || share.email}</strong><small>{share.email}</small></span>
+              <select value={share.permission} onChange={(event) => setPermission(share.email, event.target.value as 'view' | 'edit')}>
+                <option value="view">Lecture</option>
+                <option value="edit">Édition</option>
+              </select>
+              <button type="button" onClick={() => removeShare(share.email)} title="Retirer l'accès"><Trash2 size={15} /></button>
+            </div>
+          ))}
+        </div>
+        {error && <div className="inline-alert error"><AlertCircle size={16} />{error}</div>}
+        <div className="modal-actions">
+          <button className="button ghost" type="button" onClick={onClose}>Annuler</button>
+          <button className="button primary" type="button" onClick={() => void save()} disabled={saving}>
+            {saving ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}
+            Enregistrer le partage
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AnalysisWorkspace({ id, navigate }: { id: string; navigate: (route: Route) => void }) {
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [loading, setLoading] = useState(true);
@@ -578,6 +707,7 @@ function AnalysisWorkspace({ id, navigate }: { id: string; navigate: (route: Rou
   const [reprocessing, setReprocessing] = useState(false);
   const [saved, setSaved] = useState(false);
   const [manualObject, setManualObject] = useState<ManualObjectDraft | null>(null);
+  const [shareOpen, setShareOpen] = useState(false);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -716,6 +846,11 @@ function AnalysisWorkspace({ id, navigate }: { id: string; navigate: (route: Rou
         <div className="analysis-actions">
           {canEdit ? (
             <>
+              {analysis.can_manage_sharing && (
+                <button className="button ghost" onClick={() => setShareOpen(true)}>
+                  <Share2 size={17} /> Partager
+                </button>
+              )}
               <button className="button ghost" onClick={() => void reprocess()} disabled={saving || exporting || reprocessing}>
                 {reprocessing ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}
                 Ré-analyser
@@ -909,6 +1044,13 @@ function AnalysisWorkspace({ id, navigate }: { id: string; navigate: (route: Rou
             </div>
           </form>
         </div>
+      )}
+      {shareOpen && (
+        <ShareModal
+          analysis={analysis}
+          onClose={() => setShareOpen(false)}
+          onSaved={(shares) => setAnalysis((current) => current ? { ...current, shares } : current)}
+        />
       )}
     </div>
   );

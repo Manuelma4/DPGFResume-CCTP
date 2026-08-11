@@ -1,4 +1,4 @@
-import type { Analysis, AnalysisListItem, AuthUser } from './types';
+import type { Analysis, AnalysisListItem, AnalysisShare, AuthUser, DirectoryUser } from './types';
 
 export class ApiError extends Error {
   status: number;
@@ -78,4 +78,18 @@ export async function deleteAnalysis(id: string): Promise<void> {
     const data = await response.json().catch(() => ({}));
     throw new ApiError(data.detail || 'Suppression impossible', response.status);
   }
+}
+
+export function listDirectoryUsers(query = ''): Promise<DirectoryUser[]> {
+  const search = query ? `?q=${encodeURIComponent(query)}` : '';
+  return requestJson<{ users: DirectoryUser[] }>(`/api/v1/directory/users${search}`)
+    .then((response) => response.users);
+}
+
+export function updateAnalysisShares(id: string, shares: AnalysisShare[]): Promise<AnalysisShare[]> {
+  return requestJson<{ shares: AnalysisShare[] }>(`/api/v1/analyses/${id}/shares`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ shares }),
+  }).then((response) => response.shares);
 }

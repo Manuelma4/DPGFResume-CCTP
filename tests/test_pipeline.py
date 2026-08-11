@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 from app import auth, config, store
+from app import directory as directory_module
 from app import llm as llm_module
 from app.excel_export import export_analysis, export_analysis_files
 from app.extractors import extract_document
@@ -716,8 +717,10 @@ class ApiFlowTests(unittest.TestCase):
 
 
 class MultiUserPermissionTests(unittest.TestCase):
-    """DPGF Résumé CCTP is shared: everyone with app access can see every
-    analysis, but only the owner or an Admin/Copil role can edit it."""
+    """DPGF Résumé CCTP is opt-in shared: an analysis is only visible to its
+    owner or to someone it was explicitly shared with (view or edit), plus
+    whoever already holds edit rights by role (Admin/Copil/superuser) can
+    still open it directly even without a share row."""
 
     def _identity(
         self, sub: str, role: str, *, is_superuser: bool = False
@@ -761,7 +764,7 @@ class MultiUserPermissionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202, response.text)
         return response.json()["id"]
 
-    def test_non_owner_collaborateur_is_read_only(self) -> None:
+    def test_non_owner_without_share_is_forbidden_and_hidden(self) -> None:
         client = TestClient(app)
         owner = self._identity("user-a", "Collaborateur")
         other = self._identity("user-b", "Collaborateur")
@@ -769,53 +772,80 @@ class MultiUserPermissionTests(unittest.TestCase):
         try:
             with patch.object(auth.service, "current_user", return_value=other):
                 detail = client.get(f"/api/v1/analyses/{analysis_id}")
-                self.assertEqual(detail.status_code, 200, detail.text)
-                payload = detail.json()
-                self.assertFalse(payload["can_edit"])
-                self.assertEqual(payload["owner"]["sub"], "user-a")
+                self.assertEqual(detail.status_code, 403)
 
-                put_response = client.put(
-                    f"/api/v1/analyses/{analysis_id}",
-                    json={"project": payload["project"], "lots": payload["lots"]},
-                )
-                self.assertEqual(put_response.status_code, 403)
-
-                reprocess_response = client.post(
-                    f"/api/v1/analyses/{analysis_id}/reprocess"
-                )
-                self.assertEqual(reprocess_response.status_code, 403)
-
-                export_response = client.post(f"/api/v1/analyses/{analysis_id}/export")
-                self.assertEqual(export_response.status_code, 403)
-
-                delete_response = client.delete(f"/api/v1/analyses/{analysis_id}")
-                self.assertEqual(delete_response.status_code, 403)
-
-            with patch.object(auth.service, "current_user", return_value=owner):
-                owner_detail = client.get(f"/api/v1/analyses/{analysis_id}")
-                self.assertTrue(owner_detail.json()["can_edit"])
+                history = client.get("/api/v1/analyses")
+                self.assertEqual(history.status_code, 200)
+                ids = [item["id"] for item in history.json()["analyses"]]
+                self.assertNotIn(analysis_id, ids)
         finally:
             with patch.object(auth.service, "current_user", return_value=owner):
                 client.delete(f"/api/v1/analyses/{analysis_id}")
 
-    def test_admin_role_can_edit_without_being_owner(self) -> None:
+    def test_view_share_grants_read_only_access(self) -> None:
         client = TestClient(app)
-        owner = self._identity("user-a2", "Collaborateur")
-        admin = self._identity("user-c", "Admin")
+        owner = self._identity("user-a", "Collaborateur")
+        viewer = self._identity("user-b", "Collaborateur")
         analysis_id = self._create_as(client, owner)
         try:
-            with patch.object(auth.service, "current_user", return_value=admin):
+            with patch.object(auth.service, "current_user", return_value=owner):
+                share_response = client.put(
+                    f"/api/v1/analyses/{analysis_id}/shares",
+                    json={"shares": [{"email": "user-b@example.com", "permission": "view"}]},
+                )
+                self.assertEqual(share_response.status_code, 200, share_response.text)
+
+            with patch.object(auth.service, "current_user", return_value=viewer):
+                detail = client.get(f"/api/v1/analyses/{analysis_id}")
+                self.assertEqual(detail.status_code, 200, detail.text)
+                payload = detail.json()
+                self.assertFalse(payload["can_edit"])
+                self.assertFalse(payload["can_manage_sharing"])
+                self.assertEqual(payload["shares"], [])  # hidden from non-managers
+
+                history = client.get("/api/v1/analyses")
+                ids = [item["id"] for item in history.json()["analyses"]]
+                self.assertIn(analysis_id, ids)
+
+                for response in (
+                    client.put(
+                        f"/api/v1/analyses/{analysis_id}",
+                        json={"project": payload["project"], "lots": payload["lots"]},
+                    ),
+                    client.post(f"/api/v1/analyses/{analysis_id}/reprocess"),
+                    client.post(f"/api/v1/analyses/{analysis_id}/export"),
+                    client.delete(f"/api/v1/analyses/{analysis_id}"),
+                ):
+                    self.assertEqual(response.status_code, 403)
+        finally:
+            with patch.object(auth.service, "current_user", return_value=owner):
+                client.delete(f"/api/v1/analyses/{analysis_id}")
+
+    def test_edit_share_can_edit_but_not_manage_sharing(self) -> None:
+        client = TestClient(app)
+        owner = self._identity("user-a", "Collaborateur")
+        editor = self._identity("user-c", "Collaborateur")
+        analysis_id = self._create_as(client, owner)
+        try:
+            with patch.object(auth.service, "current_user", return_value=owner):
+                client.put(
+                    f"/api/v1/analyses/{analysis_id}/shares",
+                    json={"shares": [{"email": "user-c@example.com", "permission": "edit"}]},
+                )
+
+            with patch.object(auth.service, "current_user", return_value=editor):
                 detail = client.get(f"/api/v1/analyses/{analysis_id}")
                 payload = detail.json()
                 self.assertTrue(payload["can_edit"])
+                self.assertFalse(payload["can_manage_sharing"])
 
                 payload["lots"][0]["lines"].append(
                     {
-                        "id": "manual_admin",
+                        "id": "manual_editor",
                         "kind": "item",
                         "level": 3,
                         "code": "5.1.2",
-                        "designation": "Objet ajouté par Admin",
+                        "designation": "Objet ajouté par un éditeur partagé",
                         "unit": "U",
                         "quantity": 2,
                         "included": True,
@@ -828,10 +858,36 @@ class MultiUserPermissionTests(unittest.TestCase):
                     json={"project": payload["project"], "lots": payload["lots"]},
                 )
                 self.assertEqual(saved.status_code, 200, saved.text)
-                # Regression: an Admin editing someone else's analysis must not
-                # silently reassign ownership to themselves (app/store.py
-                # update_analysis always preserves the original owner).
-                self.assertEqual(saved.json()["owner"]["sub"], "user-a2")
+                # Regression: an editor who only has a share must not become
+                # the owner (app/store.py update_analysis always preserves
+                # the original owner).
+                self.assertEqual(saved.json()["owner"]["sub"], "user-a")
+
+                # An "edit" share does not let you re-share with others —
+                # sharing stays reserved for the owner/Admin/Copil.
+                escalation = client.put(
+                    f"/api/v1/analyses/{analysis_id}/shares",
+                    json={"shares": [{"email": "user-d@example.com", "permission": "view"}]},
+                )
+                self.assertEqual(escalation.status_code, 403)
+        finally:
+            with patch.object(auth.service, "current_user", return_value=owner):
+                client.delete(f"/api/v1/analyses/{analysis_id}")
+
+    def test_admin_role_can_open_by_id_but_not_listed_without_share(self) -> None:
+        client = TestClient(app)
+        owner = self._identity("user-a", "Collaborateur")
+        admin = self._identity("user-e", "Admin")
+        analysis_id = self._create_as(client, owner)
+        try:
+            with patch.object(auth.service, "current_user", return_value=admin):
+                detail = client.get(f"/api/v1/analyses/{analysis_id}")
+                self.assertEqual(detail.status_code, 200, detail.text)
+                self.assertTrue(detail.json()["can_edit"])
+
+                history = client.get("/api/v1/analyses")
+                ids = [item["id"] for item in history.json()["analyses"]]
+                self.assertNotIn(analysis_id, ids)
 
                 delete_response = client.delete(f"/api/v1/analyses/{analysis_id}")
                 self.assertEqual(delete_response.status_code, 204, delete_response.text)
@@ -840,23 +896,38 @@ class MultiUserPermissionTests(unittest.TestCase):
                 client.delete(f"/api/v1/analyses/{analysis_id}")
             raise
 
-    def test_list_is_shared_and_carries_owner_and_can_edit(self) -> None:
+    def test_replace_shares_rejects_invalid_permission(self) -> None:
         client = TestClient(app)
-        owner = self._identity("user-a3", "Collaborateur")
-        other = self._identity("user-b3", "Collaborateur")
+        owner = self._identity("user-a", "Collaborateur")
         analysis_id = self._create_as(client, owner)
         try:
-            with patch.object(auth.service, "current_user", return_value=other):
-                history = client.get("/api/v1/analyses")
-                self.assertEqual(history.status_code, 200)
-                items = history.json()["analyses"]
-                match = next((item for item in items if item["id"] == analysis_id), None)
-                self.assertIsNotNone(match)
-                self.assertFalse(match["can_edit"])
-                self.assertEqual(match["owner_name"], "Utilisateur user-a3")
+            with patch.object(auth.service, "current_user", return_value=owner):
+                response = client.put(
+                    f"/api/v1/analyses/{analysis_id}/shares",
+                    json={"shares": [{"email": "user-b@example.com", "permission": "admin"}]},
+                )
+                self.assertEqual(response.status_code, 422)
         finally:
             with patch.object(auth.service, "current_user", return_value=owner):
                 client.delete(f"/api/v1/analyses/{analysis_id}")
+
+    def test_directory_users_lists_mocked_group_members(self) -> None:
+        client = TestClient(app)
+        user = self._identity("user-a", "Collaborateur")
+        members = [
+            {"email": "user-b@example.com", "name": "Bea B", "username": "user-b"},
+            {"email": "user-c@example.com", "name": "Cy C", "username": "user-c"},
+        ]
+        with patch.object(auth.service, "current_user", return_value=user), patch.object(
+            directory_module, "list_group_members", return_value=members
+        ):
+            response = client.get("/api/v1/directory/users")
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["users"], members)
+
+            filtered = client.get("/api/v1/directory/users?q=bea")
+            self.assertEqual(len(filtered.json()["users"]), 1)
+            self.assertEqual(filtered.json()["users"][0]["email"], "user-b@example.com")
 
 
 class LlmAssistTests(unittest.TestCase):

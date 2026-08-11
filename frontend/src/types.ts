@@ -95,6 +95,18 @@ export interface AnalysisOwner {
   email: string;
 }
 
+export interface AnalysisShare {
+  email: string;
+  name: string;
+  permission: 'view' | 'edit';
+}
+
+export interface DirectoryUser {
+  email: string;
+  name: string;
+  username: string;
+}
+
 export interface Analysis {
   id: string;
   project: Project;
@@ -115,6 +127,8 @@ export interface Analysis {
   export_name: string;
   owner?: AnalysisOwner;
   can_edit: boolean;
+  can_manage_sharing: boolean;
+  shares: AnalysisShare[];
 }
 
 export interface AnalysisListItem {
@@ -136,4 +150,5 @@ export interface AnalysisListItem {
   has_export: boolean;
   owner_name: string;
   can_edit: boolean;
+  can_manage_sharing: boolean;
 }

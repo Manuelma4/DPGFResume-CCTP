@@ -66,6 +66,12 @@ OIDC_REQUIRED_GROUP = str(
 ).strip()
 OIDC_HTTP_TIMEOUT = float(ENV.get("OIDC_HTTP_TIMEOUT", "12") or 12)
 
+# API d'administration authentik (racine du panneau, distincte de
+# OIDC_ISSUER_URL qui pointe vers /application/o/<slug>/) — utilisée pour
+# lister les membres d'OIDC_REQUIRED_GROUP dans le sélecteur de partage.
+AUTHENTIK_API_URL = str(ENV.get("AUTHENTIK_API_URL", "") or "").strip().rstrip("/")
+AUTHENTIK_API_TOKEN = str(ENV.get("AUTHENTIK_API_TOKEN", "") or "").strip()
+
 LOCAL_USER_SUB = str(ENV.get("DPGF_LOCAL_USER_SUB", "local") or "local").strip()
 LOCAL_USER_NAME = str(ENV.get("DPGF_LOCAL_USER_NAME", "Utilisateur local") or "").strip()
 LOCAL_USER_EMAIL = str(ENV.get("DPGF_LOCAL_USER_EMAIL", "") or "").strip()

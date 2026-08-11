@@ -482,6 +482,38 @@ h1, h2, h3, strong { font-family: 'Manrope', 'DM Sans', sans-serif; }
 .modal-include { margin-bottom: 6px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 15px; }
 
+.share-modal {
+  width: min(520px, 100%); max-height: calc(100vh - 44px); overflow-y: auto;
+  background: white; border-radius: 13px; box-shadow: 0 30px 80px rgba(4, 22, 32, .3);
+  padding: 26px; animation: modal-in .18s ease both;
+}
+.share-search { position: relative; padding-top: 20px; }
+.share-suggestions {
+  list-style: none; margin: 6px 0 0; padding: 6px; border: 1px solid var(--line);
+  border-radius: 10px; background: white; max-height: 220px; overflow-y: auto;
+}
+.share-suggestions li + li { margin-top: 2px; }
+.share-suggestions button {
+  width: 100%; display: flex; align-items: center; gap: 9px; padding: 8px 9px;
+  border: 0; background: transparent; border-radius: 7px; cursor: pointer; text-align: left;
+}
+.share-suggestions button:hover { background: #f0f6f6; }
+.share-suggestions strong { display: block; font-size: 11px; color: var(--navy); }
+.share-suggestions small { color: var(--muted); font-size: 9px; }
+.share-list { display: flex; flex-direction: column; gap: 8px; padding-top: 16px; }
+.share-empty { color: var(--muted); font-size: 10px; text-align: center; padding: 14px 0; }
+.share-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px;
+}
+.share-row strong { display: block; font-size: 11px; color: var(--navy); }
+.share-row small { color: var(--muted); font-size: 9px; }
+.share-row select {
+  border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px; font-size: 10px;
+}
+.share-row button { border: 0; background: transparent; color: var(--muted); cursor: pointer; display: grid; place-items: center; }
+.share-row button:hover { color: #c0392b; }
+
 .auth-page {
   min-height: 100vh;
   display: grid;
