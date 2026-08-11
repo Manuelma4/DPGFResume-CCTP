@@ -13,7 +13,7 @@ from docx.enum.style import WD_STYLE_TYPE
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
-from app import config, store
+from app import auth, config, store
 from app import llm as llm_module
 from app.excel_export import export_analysis, export_analysis_files
 from app.extractors import extract_document
@@ -713,6 +713,150 @@ class ApiFlowTests(unittest.TestCase):
             self.assertEqual(tco.json()["schema_version"], "1.0")
         finally:
             client.delete(f"/api/v1/analyses/{analysis_id}")
+
+
+class MultiUserPermissionTests(unittest.TestCase):
+    """DPGF Résumé CCTP is shared: everyone with app access can see every
+    analysis, but only the owner or an Admin/Copil role can edit it."""
+
+    def _identity(
+        self, sub: str, role: str, *, is_superuser: bool = False
+    ) -> auth.UserIdentity:
+        return auth.UserIdentity(
+            sub=sub,
+            name=f"Utilisateur {sub}",
+            email=f"{sub}@example.com",
+            username=sub,
+            role=role,
+            is_superuser=is_superuser,
+        )
+
+    def _create_as(self, client: TestClient, identity: auth.UserIdentity) -> str:
+        buffer = BytesIO()
+        document = Document()
+        document.add_heading("LOT 05 — MENUISERIES", level=1)
+        document.add_heading("5.1 PORTES", level=2)
+        document.add_heading("5.1.1 Bloc-porte intérieur", level=3)
+        document.add_paragraph("Fourniture et pose à l'unité.")
+        document.save(buffer)
+        with patch.object(auth.service, "current_user", return_value=identity):
+            response = client.post(
+                "/api/v1/analyses",
+                data={
+                    "project_name": "Projet partagé",
+                    "project_reference": "SHARE-001",
+                    "phase": "DCE",
+                },
+                files=[
+                    (
+                        "files",
+                        (
+                            "CCTP LOT 05.docx",
+                            buffer.getvalue(),
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        ),
+                    ),
+                ],
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        return response.json()["id"]
+
+    def test_non_owner_collaborateur_is_read_only(self) -> None:
+        client = TestClient(app)
+        owner = self._identity("user-a", "Collaborateur")
+        other = self._identity("user-b", "Collaborateur")
+        analysis_id = self._create_as(client, owner)
+        try:
+            with patch.object(auth.service, "current_user", return_value=other):
+                detail = client.get(f"/api/v1/analyses/{analysis_id}")
+                self.assertEqual(detail.status_code, 200, detail.text)
+                payload = detail.json()
+                self.assertFalse(payload["can_edit"])
+                self.assertEqual(payload["owner"]["sub"], "user-a")
+
+                put_response = client.put(
+                    f"/api/v1/analyses/{analysis_id}",
+                    json={"project": payload["project"], "lots": payload["lots"]},
+                )
+                self.assertEqual(put_response.status_code, 403)
+
+                reprocess_response = client.post(
+                    f"/api/v1/analyses/{analysis_id}/reprocess"
+                )
+                self.assertEqual(reprocess_response.status_code, 403)
+
+                export_response = client.post(f"/api/v1/analyses/{analysis_id}/export")
+                self.assertEqual(export_response.status_code, 403)
+
+                delete_response = client.delete(f"/api/v1/analyses/{analysis_id}")
+                self.assertEqual(delete_response.status_code, 403)
+
+            with patch.object(auth.service, "current_user", return_value=owner):
+                owner_detail = client.get(f"/api/v1/analyses/{analysis_id}")
+                self.assertTrue(owner_detail.json()["can_edit"])
+        finally:
+            with patch.object(auth.service, "current_user", return_value=owner):
+                client.delete(f"/api/v1/analyses/{analysis_id}")
+
+    def test_admin_role_can_edit_without_being_owner(self) -> None:
+        client = TestClient(app)
+        owner = self._identity("user-a2", "Collaborateur")
+        admin = self._identity("user-c", "Admin")
+        analysis_id = self._create_as(client, owner)
+        try:
+            with patch.object(auth.service, "current_user", return_value=admin):
+                detail = client.get(f"/api/v1/analyses/{analysis_id}")
+                payload = detail.json()
+                self.assertTrue(payload["can_edit"])
+
+                payload["lots"][0]["lines"].append(
+                    {
+                        "id": "manual_admin",
+                        "kind": "item",
+                        "level": 3,
+                        "code": "5.1.2",
+                        "designation": "Objet ajouté par Admin",
+                        "unit": "U",
+                        "quantity": 2,
+                        "included": True,
+                        "review_status": "validated",
+                        "origin": "manual",
+                    }
+                )
+                saved = client.put(
+                    f"/api/v1/analyses/{analysis_id}",
+                    json={"project": payload["project"], "lots": payload["lots"]},
+                )
+                self.assertEqual(saved.status_code, 200, saved.text)
+                # Regression: an Admin editing someone else's analysis must not
+                # silently reassign ownership to themselves (app/store.py
+                # update_analysis always preserves the original owner).
+                self.assertEqual(saved.json()["owner"]["sub"], "user-a2")
+
+                delete_response = client.delete(f"/api/v1/analyses/{analysis_id}")
+                self.assertEqual(delete_response.status_code, 204, delete_response.text)
+        except Exception:
+            with patch.object(auth.service, "current_user", return_value=owner):
+                client.delete(f"/api/v1/analyses/{analysis_id}")
+            raise
+
+    def test_list_is_shared_and_carries_owner_and_can_edit(self) -> None:
+        client = TestClient(app)
+        owner = self._identity("user-a3", "Collaborateur")
+        other = self._identity("user-b3", "Collaborateur")
+        analysis_id = self._create_as(client, owner)
+        try:
+            with patch.object(auth.service, "current_user", return_value=other):
+                history = client.get("/api/v1/analyses")
+                self.assertEqual(history.status_code, 200)
+                items = history.json()["analyses"]
+                match = next((item for item in items if item["id"] == analysis_id), None)
+                self.assertIsNotNone(match)
+                self.assertFalse(match["can_edit"])
+                self.assertEqual(match["owner_name"], "Utilisateur user-a3")
+        finally:
+            with patch.object(auth.service, "current_user", return_value=owner):
+                client.delete(f"/api/v1/analyses/{analysis_id}")
 
 
 class LlmAssistTests(unittest.TestCase):

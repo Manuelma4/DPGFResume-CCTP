@@ -69,12 +69,40 @@ def _user(request: Request) -> auth.UserIdentity:
 
 
 def _analysis(analysis_id: str, user: auth.UserIdentity) -> dict[str, Any]:
+    # DPGF Résumé CCTP is a shared team tool: any authenticated user with app
+    # access can view any analysis. Edit permission is checked separately by
+    # _require_edit() in the handlers that actually mutate something.
+    del user
     try:
-        return store.get_analysis(analysis_id, user.sub)
+        return store.get_analysis(analysis_id)
     except store.InvalidAnalysisId as exc:
         raise HTTPException(400, str(exc)) from exc
     except store.AnalysisNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+_EDITOR_ROLES = {"Admin", "Copil"}
+
+
+def _can_edit_owner(owner_sub: str, user: auth.UserIdentity) -> bool:
+    owner_sub = str(owner_sub or "")
+    return bool(
+        (owner_sub and user.sub == owner_sub)
+        or user.role in _EDITOR_ROLES
+        or user.is_superuser
+    )
+
+
+def _can_edit(analysis: dict[str, Any], user: auth.UserIdentity) -> bool:
+    return _can_edit_owner(str((analysis.get("owner") or {}).get("sub") or ""), user)
+
+
+def _require_edit(analysis: dict[str, Any], user: auth.UserIdentity) -> None:
+    if not _can_edit(analysis, user):
+        raise HTTPException(
+            403,
+            "Seul le propriétaire ou un rôle Admin/Copil peut modifier cette analyse.",
+        )
 
 
 def _safe_original_name(value: str) -> str:
@@ -262,12 +290,12 @@ def _restore_user_content(
 
 
 def process_analysis(
-    analysis_id: str, owner_sub: str, preserve_user_content: bool = False
+    analysis_id: str, preserve_user_content: bool = False
 ) -> None:
     try:
-        analysis = store.get_analysis(analysis_id, owner_sub)
+        analysis = store.get_analysis(analysis_id)
         analysis = store.update_analysis(
-            analysis_id, owner_sub, analysis, status="processing", progress=5, error=""
+            analysis_id, analysis, status="processing", progress=5, error=""
         )
         previous_lots = {
             str(lot.get("source_id") or ""): lot
@@ -346,7 +374,6 @@ def process_analysis(
             analysis["warnings"] = warnings
             analysis = store.update_analysis(
                 analysis_id,
-                owner_sub,
                 analysis,
                 status="processing",
                 progress=progress,
@@ -369,7 +396,6 @@ def process_analysis(
         final_status = "needs_review" if stats["to_review"] else "ready"
         store.update_analysis(
             analysis_id,
-            owner_sub,
             analysis,
             status=final_status,
             progress=100,
@@ -377,10 +403,9 @@ def process_analysis(
         )
     except Exception as exc:
         try:
-            analysis = store.get_analysis(analysis_id, owner_sub)
+            analysis = store.get_analysis(analysis_id)
             store.update_analysis(
                 analysis_id,
-                owner_sub,
                 analysis,
                 status="failed",
                 progress=100,
@@ -553,16 +578,16 @@ async def create_analysis(
             document["sha256"] = digest
         analysis["documents"] = documents
         store.update_analysis(
-            analysis["id"], user.sub, analysis, status="queued", progress=2
+            analysis["id"], analysis, status="queued", progress=2
         )
     except Exception:
         try:
-            store.delete_analysis(analysis["id"], user.sub)
+            store.delete_analysis(analysis["id"])
         except Exception:
             pass
         raise
 
-    background_tasks.add_task(process_analysis, analysis["id"], user.sub)
+    background_tasks.add_task(process_analysis, analysis["id"])
     return {
         "id": analysis["id"],
         "status": "queued",
@@ -579,24 +604,24 @@ def reprocess_analysis(
 ):
     user = _user(request)
     analysis = _analysis(analysis_id, user)
+    _require_edit(analysis, user)
     if analysis.get("status") in {"queued", "processing"}:
         raise HTTPException(409, "Le traitement est déjà en cours")
     if not analysis.get("documents"):
         raise HTTPException(422, "Aucun document source n'est disponible")
-    store.snapshot_analysis(analysis_id, user.sub)
+    store.snapshot_analysis(analysis_id)
     processing = analysis.setdefault("processing", {})
     processing["reprocessing"] = True
     processing["previous_method"] = processing.get("method", "deterministic")
     store.update_analysis(
         analysis_id,
-        user.sub,
         analysis,
         status="queued",
         progress=2,
         error="",
         export_name="",
     )
-    background_tasks.add_task(process_analysis, analysis_id, user.sub, True)
+    background_tasks.add_task(process_analysis, analysis_id, True)
     return {
         "id": analysis_id,
         "status": "queued",
@@ -608,12 +633,18 @@ def reprocess_analysis(
 @app.get("/api/v1/analyses")
 def analyses(request: Request, search: str = ""):
     user = _user(request)
-    return {"analyses": store.list_analyses(user.sub, search)}
+    items = store.list_analyses(search)
+    for item in items:
+        item["can_edit"] = _can_edit_owner(str(item.get("owner_sub") or ""), user)
+    return {"analyses": items}
 
 
 @app.get("/api/v1/analyses/{analysis_id}")
 def analysis_detail(analysis_id: str, request: Request):
-    return _analysis(analysis_id, _user(request))
+    user = _user(request)
+    analysis = _analysis(analysis_id, user)
+    analysis["can_edit"] = _can_edit(analysis, user)
+    return analysis
 
 
 @app.put("/api/v1/analyses/{analysis_id}")
@@ -624,6 +655,7 @@ def save_analysis(
 ):
     user = _user(request)
     previous = _analysis(analysis_id, user)
+    _require_edit(previous, user)
     if previous.get("status") in {"queued", "processing"}:
         raise HTTPException(409, "Le traitement est encore en cours")
     project = payload.get("project")
@@ -724,7 +756,6 @@ def save_analysis(
     next_status = "needs_review" if stats["to_review"] else "ready"
     return store.update_analysis(
         analysis_id,
-        user.sub,
         previous,
         status=next_status,
         progress=100,
@@ -736,6 +767,7 @@ def save_analysis(
 def generate_export(analysis_id: str, request: Request):
     user = _user(request)
     analysis = _analysis(analysis_id, user)
+    _require_edit(analysis, user)
     if analysis.get("status") not in {"ready", "needs_review"}:
         raise HTTPException(409, "L'analyse n'est pas prête à être exportée")
     export_directory = store.export_directory(analysis_id)
@@ -753,7 +785,6 @@ def generate_export(analysis_id: str, request: Request):
         raise HTTPException(422, f"Échec de la génération Excel : {exc}") from exc
     store.update_analysis(
         analysis_id,
-        user.sub,
         analysis,
         export_name=export_name,
     )
@@ -843,8 +874,10 @@ def tco_contract(analysis_id: str, request: Request):
 @app.delete("/api/v1/analyses/{analysis_id}", status_code=204)
 def remove_analysis(analysis_id: str, request: Request):
     user = _user(request)
+    analysis = _analysis(analysis_id, user)
+    _require_edit(analysis, user)
     try:
-        store.delete_analysis(analysis_id, user.sub)
+        store.delete_analysis(analysis_id)
     except store.InvalidAnalysisId as exc:
         raise HTTPException(400, str(exc)) from exc
     except store.AnalysisNotFound as exc:

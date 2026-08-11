@@ -18,6 +18,7 @@ import {
   History,
   LayoutDashboard,
   LoaderCircle,
+  Lock,
   LogOut,
   Plus,
   RefreshCw,
@@ -316,14 +317,26 @@ function Dashboard({ navigate }: { navigate: (route: Route) => void }) {
               >
                 <span className="project-cell">
                   <span className="project-file"><FileText size={20} /></span>
-                  <span><strong>{item.project_name}</strong><small>{[item.project_reference, item.client_name].filter(Boolean).join(' · ') || 'Sans référence'}</small></span>
+                  <span>
+                    <strong>{item.project_name}</strong>
+                    <small>
+                      {[item.project_reference, item.client_name].filter(Boolean).join(' · ') || 'Sans référence'}
+                      {item.owner_name && !item.can_edit ? ` · de ${item.owner_name}` : ''}
+                    </small>
+                  </span>
                 </span>
                 <span><strong>{item.document_count}</strong><small>CCTP</small></span>
                 <span><strong>{item.lot_count} lot{item.lot_count > 1 ? 's' : ''}</strong><small>{item.line_count} postes · {item.review_count} à revoir</small></span>
                 <span><strong>{formatDate(item.updated_at)}</strong><small>{item.phase}</small></span>
                 <span><StatusBadge status={item.status} /></span>
                 <span className="row-actions">
-                  <button onClick={(event) => void remove(event, item)} title="Supprimer"><Trash2 size={16} /></button>
+                  {item.can_edit ? (
+                    <button onClick={(event) => void remove(event, item)} title="Supprimer"><Trash2 size={16} /></button>
+                  ) : (
+                    <span className="read-only-badge" title={`Lecture seule · ${item.owner_name || 'autre utilisateur'}`}>
+                      <Lock size={16} />
+                    </span>
+                  )}
                   <ChevronRight size={18} />
                 </span>
               </div>
@@ -468,6 +481,51 @@ function ProcessingView({ analysis }: { analysis: Analysis }) {
   );
 }
 
+// Mirrors the backend's natural code ordering (app/parser.py:_natural_code_key):
+// split on '.'/'-', compare numeric segments as numbers and the rest as text,
+// numeric segments always sort before non-numeric ones.
+type CodeKeyPart = [0, number] | [1, string];
+
+function naturalCodeKey(code: string): CodeKeyPart[] {
+  return code
+    .split(/[.-]/)
+    .filter(Boolean)
+    .map((part): CodeKeyPart => (/^\d+$/.test(part) ? [0, Number(part)] : [1, part.toLocaleLowerCase('fr')]));
+}
+
+function compareCodeKeys(a: CodeKeyPart[], b: CodeKeyPart[]): number {
+  const length = Math.max(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    const partA = a[index];
+    const partB = b[index];
+    if (!partA) return -1;
+    if (!partB) return 1;
+    if (partA[0] !== partB[0]) return partA[0] - partB[0];
+    if (partA[1] === partB[1]) continue;
+    return partA[1] < partB[1] ? -1 : 1;
+  }
+  return 0;
+}
+
+// A line added with a known hierarchical code (e.g. "3.1.2") belongs right
+// after the last existing line whose code sorts before it — not at the
+// bottom of the table. Lines without a code yet (a fresh blank section) keep
+// the previous append-at-the-end behaviour since there is nothing to
+// position against.
+function insertLineByCode(lines: DpgfLine[], newLine: DpgfLine): DpgfLine[] {
+  const code = newLine.code.trim();
+  if (!code) return [...lines, newLine];
+  const newKey = naturalCodeKey(code);
+  const index = lines.findIndex((line) => {
+    if (!line.code.trim()) return false;
+    return compareCodeKeys(newKey, naturalCodeKey(line.code)) < 0;
+  });
+  if (index === -1) return [...lines, newLine];
+  const next = [...lines];
+  next.splice(index, 0, newLine);
+  return next;
+}
+
 function lineTemplate(kind: 'section' | 'item', sourceId: string, level = 2): DpgfLine {
   return {
     id: `manual_${crypto.randomUUID().replaceAll('-', '').slice(0, 14)}`,
@@ -583,7 +641,7 @@ function AnalysisWorkspace({ id, navigate }: { id: string; navigate: (route: Rou
     line.included = manualObject.included;
     line.source_excerpt = 'Objet ajouté manuellement avant la génération du DPGF.';
     line.review_reason = '';
-    updateActiveLot((lot) => ({ ...lot, lines: [...lot.lines, line] }));
+    updateActiveLot((lot) => ({ ...lot, lines: insertLineByCode(lot.lines, line) }));
     setManualObject(null);
     setFilter('all');
     setSearch('');
@@ -649,24 +707,35 @@ function AnalysisWorkspace({ id, navigate }: { id: string; navigate: (route: Rou
     return <div className="page narrow-page"><button className="back-link" onClick={() => navigate({ name: 'dashboard' })}><ArrowLeft size={17} /> Retour à l'historique</button><EmptyMessage icon={<AlertCircle />} title="Le traitement a échoué">{analysis.error || 'Aucun document n’a pu être exploité.'}</EmptyMessage></div>;
   }
 
+  const canEdit = analysis.can_edit;
+
   return (
     <div className="page analysis-page">
       <div className="analysis-topline">
         <button className="back-link" onClick={() => navigate({ name: 'dashboard' })}><ArrowLeft size={17} /> Historique</button>
         <div className="analysis-actions">
-          <button className="button ghost" onClick={() => void reprocess()} disabled={saving || exporting || reprocessing}>
-            {reprocessing ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}
-            Ré-analyser
-          </button>
-          <a className="button ghost" href="/api/template"><Download size={17} /> Modèle</a>
-          <button className="button secondary" onClick={() => void persist()} disabled={saving}>
-            {saving ? <LoaderCircle className="spin" size={17} /> : saved ? <Check size={17} /> : <Save size={17} />}
-            {saved ? 'Enregistré' : 'Enregistrer'}
-          </button>
-          <button className="button primary" onClick={() => void exportExcel()} disabled={saving || exporting}>
-            {exporting ? <LoaderCircle className="spin" size={18} /> : <FileSpreadsheet size={18} />}
-            Générer l'Excel
-          </button>
+          {canEdit ? (
+            <>
+              <button className="button ghost" onClick={() => void reprocess()} disabled={saving || exporting || reprocessing}>
+                {reprocessing ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}
+                Ré-analyser
+              </button>
+              <a className="button ghost" href="/api/template"><Download size={17} /> Modèle</a>
+              <button className="button secondary" onClick={() => void persist()} disabled={saving}>
+                {saving ? <LoaderCircle className="spin" size={17} /> : saved ? <Check size={17} /> : <Save size={17} />}
+                {saved ? 'Enregistré' : 'Enregistrer'}
+              </button>
+              <button className="button primary" onClick={() => void exportExcel()} disabled={saving || exporting}>
+                {exporting ? <LoaderCircle className="spin" size={18} /> : <FileSpreadsheet size={18} />}
+                Générer l'Excel
+              </button>
+            </>
+          ) : (
+            <span className="read-only-banner">
+              <Lock size={16} />
+              Lecture seule{analysis.owner?.name ? ` · dossier de ${analysis.owner.name}` : ''}
+            </span>
+          )}
         </div>
       </div>
       <section className="analysis-heading">
@@ -726,8 +795,8 @@ function AnalysisWorkspace({ id, navigate }: { id: string; navigate: (route: Rou
           <div className="lot-heading">
             <div><p className="eyebrow">Lot {activeLot?.code || 'sans code'}</p><h2>{activeLot?.title || 'Lot'}</h2></div>
             <div className="lot-fields">
-              <label>Code<input value={activeLot?.code || ''} onChange={(event) => updateActiveLot((lot) => ({ ...lot, code: event.target.value }))} /></label>
-              <label>Intitulé<input value={activeLot?.title || ''} onChange={(event) => updateActiveLot((lot) => ({ ...lot, title: event.target.value }))} /></label>
+              <label>Code<input value={activeLot?.code || ''} disabled={!canEdit} onChange={(event) => updateActiveLot((lot) => ({ ...lot, code: event.target.value }))} /></label>
+              <label>Intitulé<input value={activeLot?.title || ''} disabled={!canEdit} onChange={(event) => updateActiveLot((lot) => ({ ...lot, title: event.target.value }))} /></label>
             </div>
           </div>
           <div className="table-toolbar">
@@ -737,34 +806,39 @@ function AnalysisWorkspace({ id, navigate }: { id: string; navigate: (route: Rou
               <button className={filter === 'to_review' ? 'active' : ''} onClick={() => setFilter('to_review')}>À contrôler</button>
               <button className={filter === 'validated' ? 'active' : ''} onClick={() => setFilter('validated')}>Validés</button>
             </div>
-            <div className="add-menu">
-              <button onClick={() => updateActiveLot((lot) => ({ ...lot, lines: [...lot.lines, lineTemplate('section', lot.source_id, 2)] }))}><Plus size={15} /> Section</button>
-              <button className="add-object-button" onClick={() => setManualObject({ ...emptyManualObject })}><Plus size={15} /> Ajouter un objet</button>
-            </div>
+            {canEdit && (
+              <div className="add-menu">
+                <button onClick={() => updateActiveLot((lot) => ({ ...lot, lines: insertLineByCode(lot.lines, lineTemplate('section', lot.source_id, 2)) }))}><Plus size={15} /> Section</button>
+                <button className="add-object-button" onClick={() => setManualObject({ ...emptyManualObject })}><Plus size={15} /> Ajouter un objet</button>
+              </div>
+            )}
           </div>
           <div className="dpgf-table">
             <div className="dpgf-header"><span>Code</span><span>Désignation</span><span>Unité</span><span>Quantité</span><span>Contrôle</span><span>Source</span><span /></div>
             {visibleLines.length === 0 && <EmptyMessage icon={<Search />} title="Aucune ligne visible">Modifiez la recherche ou le filtre actif.</EmptyMessage>}
             {visibleLines.map((line) => line.kind === 'section' ? (
               <div className="section-row" key={line.id} style={{ '--indent': Math.max(0, line.level - 1) } as React.CSSProperties}>
-                <input aria-label="Code de section" value={line.code} onChange={(event) => updateLine(line.id, { code: event.target.value })} />
-                <input aria-label="Désignation de section" value={line.designation} onChange={(event) => updateLine(line.id, { designation: event.target.value })} />
-                <button onClick={() => updateActiveLot((lot) => ({ ...lot, lines: lot.lines.filter((item) => item.id !== line.id) }))} title="Supprimer"><Trash2 size={15} /></button>
+                <input aria-label="Code de section" value={line.code} disabled={!canEdit} onChange={(event) => updateLine(line.id, { code: event.target.value })} />
+                <input aria-label="Désignation de section" value={line.designation} disabled={!canEdit} onChange={(event) => updateLine(line.id, { designation: event.target.value })} />
+                {canEdit && (
+                  <button onClick={() => updateActiveLot((lot) => ({ ...lot, lines: lot.lines.filter((item) => item.id !== line.id) }))} title="Supprimer"><Trash2 size={15} /></button>
+                )}
               </div>
             ) : (
               <div className={`dpgf-row ${line.review_status === 'to_review' ? 'needs-review' : ''}`} key={line.id}>
-                <input className="code-input" value={line.code} onChange={(event) => updateLine(line.id, { code: event.target.value })} placeholder="—" />
+                <input className="code-input" value={line.code} disabled={!canEdit} onChange={(event) => updateLine(line.id, { code: event.target.value })} placeholder="—" />
                 <div className="designation-input" style={{ paddingLeft: `${Math.max(0, line.level - 2) * 14}px` }}>
-                  <input aria-label={`Désignation ${line.code || 'du poste'}`} value={line.designation} onChange={(event) => updateLine(line.id, { designation: event.target.value })} />
+                  <input aria-label={`Désignation ${line.code || 'du poste'}`} value={line.designation} disabled={!canEdit} onChange={(event) => updateLine(line.id, { designation: event.target.value })} />
                   {!line.included && <small>Option / variante — hors offre de base</small>}
                   {line.review_reason && <small>{line.review_reason}</small>}
                 </div>
-                <select aria-label={`Unité ${line.code || line.designation}`} value={line.unit || 'Ens'} onChange={(event) => updateLine(line.id, { unit: event.target.value })}>
+                <select aria-label={`Unité ${line.code || line.designation}`} value={line.unit || 'Ens'} disabled={!canEdit} onChange={(event) => updateLine(line.id, { unit: event.target.value })}>
                   {UNIT_OPTIONS.map((unit) => <option key={unit}>{unit}</option>)}
                 </select>
-                <input className="number-input" type="number" step="any" value={line.quantity ?? ''} onChange={(event) => updateLine(line.id, { quantity: event.target.value === '' ? null : Number(event.target.value) })} placeholder="—" />
+                <input className="number-input" type="number" step="any" value={line.quantity ?? ''} disabled={!canEdit} onChange={(event) => updateLine(line.id, { quantity: event.target.value === '' ? null : Number(event.target.value) })} placeholder="—" />
                 <button
                   className={`review-toggle ${line.review_status}`}
+                  disabled={!canEdit}
                   onClick={() => updateLine(line.id, { review_status: line.review_status === 'validated' ? 'to_review' : 'validated', review_reason: line.review_status === 'validated' ? 'Marqué à contrôler' : '' })}
                   title={line.review_status === 'validated' ? 'Marquer à contrôler' : 'Valider'}
                 >
@@ -774,7 +848,9 @@ function AnalysisWorkspace({ id, navigate }: { id: string; navigate: (route: Rou
                 <button className="source-button" onClick={() => setSelectedLine(line)}>
                   <FileText size={15} /><span>{line.origin === 'manual' ? 'Manuel' : line.source_page ? `p. ${line.source_page}` : 'Word'}</span>
                 </button>
-                <button className="delete-line" onClick={() => updateActiveLot((lot) => ({ ...lot, lines: lot.lines.filter((item) => item.id !== line.id) }))} title="Supprimer"><Trash2 size={15} /></button>
+                {canEdit && (
+                  <button className="delete-line" onClick={() => updateActiveLot((lot) => ({ ...lot, lines: lot.lines.filter((item) => item.id !== line.id) }))} title="Supprimer"><Trash2 size={15} /></button>
+                )}
               </div>
             ))}
           </div>
@@ -796,12 +872,15 @@ function AnalysisWorkspace({ id, navigate }: { id: string; navigate: (route: Rou
               <input
                 type="checkbox"
                 checked={selectedLine.included}
+                disabled={!canEdit}
                 onChange={(event) => updateLine(selectedLine.id, { included: event.target.checked })}
               />
               <span><strong>Inclure dans l'offre de base</strong><small>Décochez pour conserver l'objet comme option ou variante.</small></span>
             </label>
             {selectedLine.description && <div className="excerpt"><span>Contexte</span><p>{selectedLine.description}</p></div>}
-            <button className="button primary full" onClick={() => { updateLine(selectedLine.id, { review_status: 'validated', review_reason: '' }); setSelectedLine(null); }}><CheckCircle2 size={17} /> Valider ce poste</button>
+            {canEdit && (
+              <button className="button primary full" onClick={() => { updateLine(selectedLine.id, { review_status: 'validated', review_reason: '' }); setSelectedLine(null); }}><CheckCircle2 size={17} /> Valider ce poste</button>
+            )}
           </aside>
         </div>
       )}

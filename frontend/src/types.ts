@@ -89,6 +89,12 @@ export interface AnalysisWarning {
   message: string;
 }
 
+export interface AnalysisOwner {
+  sub: string;
+  name: string;
+  email: string;
+}
+
 export interface Analysis {
   id: string;
   project: Project;
@@ -107,6 +113,8 @@ export interface Analysis {
   };
   error: string;
   export_name: string;
+  owner?: AnalysisOwner;
+  can_edit: boolean;
 }
 
 export interface AnalysisListItem {
@@ -126,4 +134,6 @@ export interface AnalysisListItem {
   review_count: number;
   error: string;
   has_export: boolean;
+  owner_name: string;
+  can_edit: boolean;
 }

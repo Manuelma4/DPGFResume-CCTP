@@ -98,9 +98,9 @@ def export_directory(analysis_id: str) -> Path:
     return path
 
 
-def snapshot_analysis(analysis_id: str, owner_sub: str) -> Path:
+def snapshot_analysis(analysis_id: str) -> Path:
     """Keep a recoverable copy before a deterministic reprocessing."""
-    payload = get_analysis(analysis_id, owner_sub)
+    payload = get_analysis(analysis_id)
     directory = analysis_directory(analysis_id).resolve()
     allowed_parent = config.ANALYSES_DIR.resolve()
     if directory.parent != allowed_parent:
@@ -135,6 +135,11 @@ def _row_to_payload(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _summary(row: sqlite3.Row) -> dict[str, Any]:
+    owner = {}
+    try:
+        owner = json.loads(row["payload_json"]).get("owner") or {}
+    except json.JSONDecodeError:
+        pass
     return {
         "id": row["id"],
         "project_name": row["project_name"],
@@ -152,6 +157,8 @@ def _summary(row: sqlite3.Row) -> dict[str, Any]:
         "review_count": row["review_count"],
         "error": row["error"],
         "has_export": bool(row["export_name"]),
+        "owner_sub": row["owner_sub"],
+        "owner_name": str(owner.get("name") or owner.get("email") or ""),
     }
 
 
@@ -231,26 +238,29 @@ def create_analysis(
     return payload
 
 
-def get_analysis(analysis_id: str, owner_sub: str) -> dict[str, Any]:
+def get_analysis(analysis_id: str) -> dict[str, Any]:
     analysis_id = validate_analysis_id(analysis_id)
     with _connection() as connection:
         row = connection.execute(
-            "SELECT * FROM analyses WHERE id = ? AND owner_sub = ?",
-            (analysis_id, owner_sub),
+            "SELECT * FROM analyses WHERE id = ?",
+            (analysis_id,),
         ).fetchone()
     if row is None:
         raise AnalysisNotFound("Analyse introuvable")
     return _row_to_payload(row)
 
 
-def list_analyses(owner_sub: str, search: str = "") -> list[dict[str, Any]]:
-    parameters: list[Any] = [owner_sub]
-    query = "SELECT * FROM analyses WHERE owner_sub = ?"
+def list_analyses(search: str = "") -> list[dict[str, Any]]:
+    # Visible to every authenticated user with app access — DPGF Résumé CCTP
+    # is a shared team tool, not per-user private storage. Write permission
+    # (owner or elevated role) is decided in app/main.py, not here.
+    parameters: list[Any] = []
+    query = "SELECT * FROM analyses"
     search = str(search or "").strip()
     if search:
         query += (
-            " AND (project_name LIKE ? OR project_reference LIKE ? "
-            "OR client_name LIKE ?)"
+            " WHERE project_name LIKE ? OR project_reference LIKE ? "
+            "OR client_name LIKE ?"
         )
         term = f"%{search}%"
         parameters.extend([term, term, term])
@@ -262,7 +272,6 @@ def list_analyses(owner_sub: str, search: str = "") -> list[dict[str, Any]]:
 
 def update_analysis(
     analysis_id: str,
-    owner_sub: str,
     payload: dict[str, Any],
     *,
     status: str | None = None,
@@ -270,11 +279,14 @@ def update_analysis(
     error: str | None = None,
     export_name: str | None = None,
 ) -> dict[str, Any]:
-    previous = get_analysis(analysis_id, owner_sub)
-    immutable_owner = previous.get("owner") or {"sub": owner_sub}
+    previous = get_analysis(analysis_id)
+    # The owner never changes just because someone else (an editor with an
+    # elevated role, or an Admin) saves the analysis — preserve it from the
+    # stored row, never from whoever is currently writing.
+    immutable_owner = previous.get("owner") or {}
     payload["id"] = analysis_id
     payload["owner"] = immutable_owner
-    payload["owner_sub"] = owner_sub
+    payload["owner_sub"] = str(immutable_owner.get("sub") or "")
     payload["created_at"] = previous.get("created_at")
     payload["updated_at"] = now_iso()
     if status is not None:
@@ -297,7 +309,7 @@ def update_analysis(
                 updated_at = ?, document_count = ?, lot_count = ?,
                 line_count = ?, review_count = ?, error = ?, export_name = ?,
                 payload_json = ?
-            WHERE id = ? AND owner_sub = ?
+            WHERE id = ?
             """,
             (
                 str(project.get("name") or ""),
@@ -316,7 +328,6 @@ def update_analysis(
                 next_export,
                 json.dumps(payload, ensure_ascii=False),
                 analysis_id,
-                owner_sub,
             ),
         )
     payload["error"] = next_error
@@ -326,16 +337,14 @@ def update_analysis(
 
 def update_progress(
     analysis_id: str,
-    owner_sub: str,
     *,
     status: str,
     progress: int,
     error: str = "",
 ) -> dict[str, Any]:
-    payload = get_analysis(analysis_id, owner_sub)
+    payload = get_analysis(analysis_id)
     return update_analysis(
         analysis_id,
-        owner_sub,
         payload,
         status=status,
         progress=progress,
@@ -343,16 +352,16 @@ def update_progress(
     )
 
 
-def delete_analysis(analysis_id: str, owner_sub: str) -> None:
-    get_analysis(analysis_id, owner_sub)
+def delete_analysis(analysis_id: str) -> None:
+    get_analysis(analysis_id)
     directory = analysis_directory(analysis_id).resolve()
     allowed_parent = config.ANALYSES_DIR.resolve()
     if directory.parent != allowed_parent:
         raise RuntimeError("Répertoire d'analyse hors périmètre")
     with _write_lock, _connection() as connection:
         connection.execute(
-            "DELETE FROM analyses WHERE id = ? AND owner_sub = ?",
-            (analysis_id, owner_sub),
+            "DELETE FROM analyses WHERE id = ?",
+            (analysis_id,),
         )
     if directory.exists():
         shutil.rmtree(directory)
