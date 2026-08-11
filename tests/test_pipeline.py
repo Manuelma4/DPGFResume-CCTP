@@ -133,6 +133,33 @@ class ExtractionTests(unittest.TestCase):
         )
         self.assertEqual(lot["perimeter"]["method"], "explicit_anchor")
 
+    def test_only_x_and_x_x_codes_are_titles_even_with_numbered_children(self) -> None:
+        # Real DPGF only bold-title "x" chapters and "x.x" sub-chapters (e.g.
+        # "3" SPECIFICATIONS TECHNIQUES GENERALES, "3.1" TRAVAUX GENERAUX).
+        # A "3.4.2" heading that itemises its own sub-parts (3.4.2.1, 3.4.2.2)
+        # is still a priceable row, not a spurious bold header — validated
+        # against a real Bonduelle LOT 01 VRD CCTP/DPGF pair.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 01 VRD.docx"
+            document = Document()
+            document.add_heading("LOT 01 — VRD", level=1)
+            document.add_heading("3.4 OUVRAGES D'ASSAINISSEMENT", level=2)
+            document.add_heading(
+                "3.4.2 Fourniture et pose de canalisation", level=3
+            )
+            document.add_heading("3.4.2.1 Tranchée pour pose de canalisation", level=4)
+            document.add_paragraph("Section courante, quantité en ml.")
+            document.add_heading("3.4.2.2 Remblai de tranchée", level=4)
+            document.add_paragraph("Remblai compacté, quantité en m³.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_deep_title")
+
+        by_code = {line["code"]: line for line in lot["lines"]}
+        self.assertEqual(by_code["3.4"]["kind"], "section")
+        self.assertEqual(by_code["3.4.2"]["kind"], "item")
+        self.assertEqual(by_code["3.4.2.1"]["kind"], "item")
+        self.assertEqual(by_code["3.4.2.2"]["kind"], "item")
+
     def test_curly_apostrophe_matches_straight_apostrophe_rules(self) -> None:
         # Word CCTP text overwhelmingly types "d’étanchéité" with a curly
         # apostrophe (’) while UNIT_RULES/DECOMPOSITION_RULES are written in
@@ -333,6 +360,54 @@ class ExtractionTests(unittest.TestCase):
         designations = {line["designation"] for line in lot["lines"]}
         self.assertIn("Repérage étiquetage", designations)
         self.assertIn("Analyse d'eau", designations)
+
+    def _build_control_trigger_docx(self, path: Path, lot_heading: str) -> None:
+        document = Document()
+        document.add_heading(lot_heading, level=1)
+        document.add_heading("3.4 OUVRAGES D'ASSAINISSEMENT", level=2)
+        document.add_heading("3.4.1 Ouvrages d'assainissement", level=3)
+        document.add_paragraph("Ensemble des canalisations et regards, au forfait.")
+        document.add_heading("3.4.2 Nettoyage de fin de chantier", level=3)
+        document.add_paragraph("Ensemble, forfait.")
+        document.add_heading("3.5 REFECTION DE VOIRIE", level=2)
+        document.add_heading("3.5.1 Réglage de fond de forme", level=3)
+        document.add_paragraph("Surface en m².")
+        document.save(path)
+
+    def test_vrd_defers_rule_derived_control_lines_to_end_of_section(self) -> None:
+        # Real DPGF group "Contrôle qualité" lines at the end of their own
+        # section (e.g. right before "Sous-total 3.4"), not wherever the
+        # triggering CCTP text happened to sit — validated against a real
+        # Bonduelle LOT 01 VRD CCTP/DPGF pair.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 01 VRD.docx"
+            self._build_control_trigger_docx(path, "LOT 01 — VRD")
+            lot = parse_document(extract_document(path), "src_vrd_control")
+
+        designations = [line["designation"] for line in lot["lines"]]
+        control_index = designations.index(
+            "Contrôle qualité des ouvrages d'assainissement (étanchéité RV)"
+        )
+        cleanup_index = designations.index("Nettoyage de fin de chantier")
+        next_section_index = designations.index("REFECTION DE VOIRIE")
+        self.assertGreater(control_index, cleanup_index)
+        self.assertLess(control_index, next_section_index)
+
+    def test_non_vrd_lot_keeps_control_lines_in_original_position(self) -> None:
+        # The end-of-section grouping is a VRD DPGF convention, not a
+        # universal rule — other trades keep the historical in-place
+        # insertion until a similar convention is confirmed for them too.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 03 GROS OEUVRE.docx"
+            self._build_control_trigger_docx(path, "LOT 03 — GROS ŒUVRE")
+            lot = parse_document(extract_document(path), "src_gros_oeuvre_control")
+
+        designations = [line["designation"] for line in lot["lines"]]
+        control_index = designations.index(
+            "Contrôle qualité des ouvrages d'assainissement (étanchéité RV)"
+        )
+        cleanup_index = designations.index("Nettoyage de fin de chantier")
+        self.assertLess(control_index, cleanup_index)
 
     def test_decomposition_rule_skips_variant_already_written_in_cctp(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

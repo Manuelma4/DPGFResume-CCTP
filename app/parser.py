@@ -1031,16 +1031,30 @@ def _deduplicate_candidates(
     return result, conflicting_codes
 
 
+_CONTROL_CHILD_PATTERN = re.compile(r"^controle\s+qualit", re.IGNORECASE)
+
+
 def _apply_decomposition_rules(
-    lines: list[dict[str, Any]], source_id: str
+    lines: list[dict[str, Any]], source_id: str, lot_family: str | None = None
 ) -> list[dict[str, Any]]:
+    # Grouping "Contrôle qualité" lines at the end of their section (instead
+    # of wherever the triggering CCTP text sat) matches how VRD DPGF are
+    # conventionally laid out. Other trades may order control/test lines
+    # differently, so this stays VRD-only until a similar convention is
+    # confirmed for another lot family.
+    defer_controls = lot_family == "vrd"
     existing_normalized = {
         _normalized(str(line.get("designation") or "")) for line in lines
     }
     existing_normalized.discard("")
     triggered_rules: set[int] = set()
     expanded: list[dict[str, Any]] = []
+    deferred_controls: list[dict[str, Any]] = []
     added_count = 0
+
+    def flush_deferred_controls() -> None:
+        expanded.extend(deferred_controls)
+        deferred_controls.clear()
 
     def is_duplicate(child_key: str) -> bool:
         # A child's designation always shares the parent's trigger phrase
@@ -1063,6 +1077,13 @@ def _apply_decomposition_rules(
         return False
 
     for line in lines:
+        # A new chapter/sub-chapter ("x" or "x.x") closes out whatever
+        # "Contrôle qualité" lines were queued while working through the
+        # previous section, so they land grouped at the end of their own
+        # section (matching real DPGF layout) instead of scattered wherever
+        # the triggering CCTP text happened to sit inside that section.
+        if defer_controls and line.get("kind") == "section" and int(line.get("level") or 0) <= 2:
+            flush_deferred_controls()
         expanded.append(line)
         if line.get("kind") != "item":
             continue
@@ -1077,37 +1098,40 @@ def _apply_decomposition_rules(
                 if is_duplicate(child_key):
                     continue
                 added_count += 1
-                expanded.append(
-                    {
-                        "id": _stable_id(
-                            source_id, "", child_designation, 900000 + added_count
-                        ),
-                        "kind": "item",
-                        "level": int(line.get("level") or 1) + 1,
-                        "code": "",
-                        "designation": child_designation,
-                        "description": "",
-                        "unit": child_unit,
-                        "unit_source": "rule",
-                        "unit_confidence": 0.75,
-                        "quantity": None,
-                        "quantity_source": "missing",
-                        "unit_price": None,
-                        "included": True,
-                        "confidence": 0.6,
-                        "review_status": "to_review",
-                        "review_reason": (
-                            f"Ajouté selon la règle métier : {designation.strip()} "
-                            f"implique {child_designation}"
-                        ),
-                        "review_fields": [],
-                        "source_id": source_id,
-                        "source_page": None,
-                        "source_excerpt": "",
-                        "origin": "rule-derived",
-                    }
-                )
+                child_line = {
+                    "id": _stable_id(
+                        source_id, "", child_designation, 900000 + added_count
+                    ),
+                    "kind": "item",
+                    "level": int(line.get("level") or 1) + 1,
+                    "code": "",
+                    "designation": child_designation,
+                    "description": "",
+                    "unit": child_unit,
+                    "unit_source": "rule",
+                    "unit_confidence": 0.75,
+                    "quantity": None,
+                    "quantity_source": "missing",
+                    "unit_price": None,
+                    "included": True,
+                    "confidence": 0.6,
+                    "review_status": "to_review",
+                    "review_reason": (
+                        f"Ajouté selon la règle métier : {designation.strip()} "
+                        f"implique {child_designation}"
+                    ),
+                    "review_fields": [],
+                    "source_id": source_id,
+                    "source_page": None,
+                    "source_excerpt": "",
+                    "origin": "rule-derived",
+                }
                 existing_normalized.add(child_key)
+                if defer_controls and _CONTROL_CHILD_PATTERN.search(child_key):
+                    deferred_controls.append(child_line)
+                else:
+                    expanded.append(child_line)
+    flush_deferred_controls()
     return expanded
 
 
@@ -1183,10 +1207,20 @@ def parse_document(
             (perimeter["method"] == "explicit_anchor" and WORK_ANCHOR.search(candidate.title))
             or perimeter["method"] == "llm_confirmed_anchor"
         )
-        # The hierarchy is structural: a numbered heading is a section only
-        # when it really owns smaller numerals. A leaf such as 4.6 is always a
-        # priceable row with a unit, even if its label is "Généralités".
-        is_section = is_anchor or has_child or candidate.level <= 1
+        # Only "x" and "x.x" codes read as real chapter/sub-chapter titles in
+        # a DPGF (e.g. "3" SPECIFICATIONS TECHNIQUES GENERALES, "3.1" TRAVAUX
+        # GENERAUX) — and only when they actually own smaller numerals ("x.x"
+        # can just as well be a genuine leaf item in a shallower CCTP). Codes
+        # three levels deep or more are always priceable rows, even when a
+        # CCTP heading at that depth structurally owns smaller numerals (e.g.
+        # a "3.4.2 Fourniture et pose de canalisation :" item introducing its
+        # own itemised sub-parts) — treating those as titles was producing
+        # spurious bold headers instead of a plain, indented item.
+        is_section = (
+            is_anchor
+            or candidate.level <= 1
+            or (has_child and candidate.level == 2)
+        )
         kind = "section" if is_section else "item"
         unit, unit_source, unit_confidence = _infer_unit(
             candidate.title, context, lot_family
@@ -1242,7 +1276,7 @@ def parse_document(
             }
         )
 
-    lines = _apply_decomposition_rules(lines, source_id)
+    lines = _apply_decomposition_rules(lines, source_id, lot_family)
 
     item_count = sum(1 for line in lines if line["kind"] == "item")
     if item_count == 0:
