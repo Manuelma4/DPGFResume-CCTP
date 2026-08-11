@@ -165,6 +165,7 @@ Les instructions WinSCP, Docker, Apache et TLS se trouvent dans
 La validation compile le backend, exécute les tests extraction/API/Excel et compile
 le frontend React.
 
+
 ## Limites connues
 
 - les fichiers Word historiques `.doc` doivent être convertis en `.docx` ;
