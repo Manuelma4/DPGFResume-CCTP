@@ -5,10 +5,6 @@ standardisés, contrôlables et traçables.
 
 Le dossier applicatif est indépendant de ModuoCopil et de TCO :
 
-```text
-C:\Projet WEB\DPGFResume CCTP
-```
-
 ## Fonctions livrées
 
 - import multiple de CCTP PDF texte et Word `.docx` ;
@@ -29,7 +25,7 @@ C:\Projet WEB\DPGFResume CCTP
 Prérequis : Python 3.11+, Node.js 18+.
 
 ```powershell
-cd "C:\Projet WEB\DPGFResume CCTP"
+cd "DPGFResume CCTP"
 .\setup.ps1
 .\run.ps1
 ```
