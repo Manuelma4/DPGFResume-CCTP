@@ -17,8 +17,12 @@ NUMBERED_HEADING = re.compile(
     re.IGNORECASE,
 )
 LOT_PATTERN = re.compile(
+    # Le séparateur entre le code et le titre est le plus souvent un tiret
+    # ("LOT 05 — MENUISERIES") mais certains CCTP réels l'omettent complètement
+    # ("CCTP LOT 6 CVC - DESENFUMAGE" : rien entre "6" et "CVC", le tiret
+    # n'arrive que plus loin) — un simple espace doit donc aussi être accepté.
     r"\bLOT\s*(?:N[°O]\s*)?(?P<code>[A-Z]?\d{1,3}(?:[.\-]\d{1,3})?)"
-    r"\s*[-–—:]\s*(?P<title>[^\n|]{3,100})",
+    r"(?:\s*[-–—:]\s*|\s+)(?P<title>[^\n|]{3,100})",
     re.IGNORECASE,
 )
 TOC_PATTERN = re.compile(r"\.{3,}\s*\d+\s*$")
@@ -503,6 +507,35 @@ FAMILY_UNIT_OVERRIDES: dict[str, list[tuple[str, float, re.Pattern[str]]]] = {
             0.7,
             re.compile(r"\b(?:reseau|cablage|canalisations?|cables?)\b", re.IGNORECASE),
         ),
+        # Minage réel 2026, deux passes :
+        # 1) 3 CCTP/DPGF (Océania Lot 16, Quaero Lot 12, IFO_MAR Lot 06) —
+        #    donnait à tort "réseaux aérauliques" → ml et "passerelle"/
+        #    "automate" → U sur la seule foi de 1-2 documents.
+        # 2) 96 projets réels dépareillés depuis /Volumes/PARTAGE/ME/B_PROJETS
+        #    (17 617 couples désignation/unité) — a contredit "réseaux
+        #    aérauliques" (en réalité Ens à 80 %, 10 projets) et n'a trouvé
+        #    quasiment aucune preuve pour "passerelle" (67 %, 9 projets) ni
+        #    "automate" (2 projets seulement) : ces deux dernières règles sont
+        #    retirées faute de preuve, pas remplacées.
+        (
+            "Ens",
+            0.78,
+            re.compile(r"reseaux?\s+aerauliques?", re.IGNORECASE),
+        ),
+        (
+            "U",
+            0.85,
+            re.compile(
+                r"vases?\s+d['’]?\s*expansion|\bcaissons?\b|\bboitiers?\b|"
+                r"\bsoupapes?\b|\btamis\b|desemboueurs?",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "Ens",
+            0.72,
+            re.compile(r"\bregulation\b|\bcollecteurs?\b", re.IGNORECASE),
+        ),
     ],
     "desamiantage_demolition": [
         (
@@ -518,6 +551,20 @@ FAMILY_UNIT_OVERRIDES: dict[str, list[tuple[str, float, re.Pattern[str]]]] = {
 # départage quand plusieurs CCTP indépendants produisent des codes de lot égaux
 # ou absents ; un code de lot explicite et distinct reste toujours prioritaire.
 LOT_FAMILY_RULES: list[tuple[str, int, re.Pattern[str]]] = [
+    # Un lot combiné "CVC-Désenfumage" (courant en réel — cf. IFO_MAR Lot 06)
+    # doit rester classé "cvc" : sans cette règle en tête de liste, le simple
+    # mot "desenfumage" matcherait d'abord la règle couverture/étanchéité/
+    # bardage plus bas (pensée pour un lot de désenfumage seul, sans CVC), ce
+    # qui privait tout le lot des règles d'unité spécifiques CVC.
+    (
+        "cvc",
+        12,
+        re.compile(
+            r"(?:\bcvc\b|chauffage|ventilation|climatisation).{0,40}desenfumage|"
+            r"desenfumage.{0,40}(?:\bcvc\b|chauffage|ventilation|climatisation)",
+            re.IGNORECASE,
+        ),
+    ),
     (
         "desamiantage_demolition",
         0,
@@ -616,13 +663,37 @@ GENERIC_SECTION_TITLES = {
     "description des ouvrages",
     "description des travaux",
     "descriptif des ouvrages",
+    # Minage réel 2026 sur 3 CCTP/DPGF CVC (Océania, Quaero, IFO_MAR) : ces
+    # sous-titres narratifs n'ont jamais d'équivalent en ligne de DPGF chez
+    # l'économiste — ce sont des paragraphes d'explication, pas des ouvrages
+    # à chiffrer.
+    "principe",
+    "conditions exterieures",
+    "conditions interieures",
+    "acoustique",
+    "certification eurovent",
+    "certification passive house",
+    "niveaux sonores",
+    "charges internes",
+    "bilan estime",
+    "limites de prestations",
+    "efficacite energetique des moteurs",
 }
 SPECIFICATION_ONLY = re.compile(
-    r"^(?:nature des prestations|localisation|aperçu(?: de l['’]ouvrage)?|"
-    r"mode d['’]exécution|mise en œuvre|caractéristiques(?: techniques)?|"
-    r"performances?|documents? de référence|normes? et réglementations?)$",
+    r"^(?:nature des prestations|localisation|apercu(?: de l['’]ouvrage)?|"
+    r"mode d['’]execution|mise en œuvre|caracteristiques(?: techniques)?|"
+    r"performances?|documents? de reference|normes? et reglementations?|"
+    r"specifications? generales(?: de la technologie retenue)?|"
+    r"interface avec le lot .+)$",
     re.IGNORECASE,
 )
+
+
+def _is_generic_administrative_title(title: str) -> bool:
+    normalized = _normalized(title)
+    return normalized in GENERIC_SECTION_TITLES or bool(
+        SPECIFICATION_ONLY.match(normalized)
+    )
 
 
 _APOSTROPHES = re.compile(r"[‘’ʼ´`]")
@@ -1222,6 +1293,15 @@ def parse_document(
             or (has_child and candidate.level == 2)
         )
         kind = "section" if is_section else "item"
+        if kind == "item" and not is_anchor and _is_generic_administrative_title(
+            candidate.title
+        ):
+            # Narrative CCTP sub-headings ("Généralités", "Principe",
+            # "Acoustique", "Certification EUROVENT"...) never become their
+            # own DPGF line in practice — only their real, priceable
+            # children (if any) do, and those are still emitted normally on
+            # their own iteration of this loop.
+            continue
         unit, unit_source, unit_confidence = _infer_unit(
             candidate.title, context, lot_family
         )

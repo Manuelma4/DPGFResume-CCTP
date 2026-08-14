@@ -793,7 +793,7 @@ def save_analysis(
                     continue
                 kind = "section" if line.get("kind") == "section" else "item"
                 unit = str(line.get("unit") or "Ens")
-                if unit not in {"m²", "m³", "ml", "U", "Ens", "kg", "h"}:
+                if unit not in {"m²", "m³", "ml", "U", "Ens", "kg", "h", "PM"}:
                     unit = "Ens"
                 quantity = line.get("quantity")
                 try:

@@ -60,7 +60,7 @@ import type {
 
 type Route = { name: 'dashboard' } | { name: 'new' } | { name: 'analysis'; id: string };
 
-const UNIT_OPTIONS = ['Ens', 'U', 'ml', 'm²', 'm³', 'kg', 'h', 'mois'];
+const UNIT_OPTIONS = ['Ens', 'U', 'ml', 'm²', 'm³', 'kg', 'h', 'mois', 'PM'];
 
 function readRoute(): Route {
   const match = window.location.pathname.match(/^\/analyses\/([a-f0-9]{32})\/?$/);

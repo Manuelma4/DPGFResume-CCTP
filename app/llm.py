@@ -13,7 +13,8 @@ SYSTEM_PROMPT = """Tu es économiste de la construction en France.
 Tu transformes un CCTP en lignes de DPGF sans inventer de prestation.
 Chaque ligne doit être traçable vers un titre ou un passage de la source.
 Conserve la hiérarchie et les codes du CCTP. Une quantité absente reste null.
-Choisis uniquement une unité parmi m², m³, ml, U, Ens, kg, h.
+Choisis uniquement une unité parmi m², m³, ml, U, Ens, kg, h, PM
+(PM = pour mémoire, poste informatif non chiffré).
 Retourne exclusivement un objet JSON avec les clés lot_code, lot_title et lines.
 Chaque élément de lines contient kind (section ou item), level, code, designation,
 unit, quantity, source_page, source_excerpt, confidence et review_reason."""
@@ -31,12 +32,13 @@ convient. N'invente jamais un code absent de la liste."""
 UNIT_SYSTEM_PROMPT = """Tu es économiste de la construction en France.
 On te donne une liste de postes de CCTP (code + désignation, sans contexte).
 Pour chacun, donne l'unité de métré la plus probable parmi exactement :
-m², m³, ml, U, Ens, kg. Réponds uniquement par un objet JSON
+m², m³, ml, U, Ens, kg, PM (PM = pour mémoire, poste informatif non
+chiffré). Réponds uniquement par un objet JSON
 {"units": {"<code>": "<unite>", ...}} avec une entrée par code fourni. N'utilise
 jamais une unité hors de cette liste et n'ajoute pas de code absent de la
 liste fournie."""
 
-ALLOWED_UNITS = {"m²", "m³", "ml", "U", "Ens", "kg"}
+ALLOWED_UNITS = {"m²", "m³", "ml", "U", "Ens", "kg", "PM"}
 
 
 def available() -> bool:

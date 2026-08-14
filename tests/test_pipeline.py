@@ -323,6 +323,93 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(vrd_item["unit"], "ml")
         self.assertEqual(elec_item["unit"], "Ens")
 
+    def test_generic_administrative_headings_are_dropped_but_children_survive(
+        self,
+    ) -> None:
+        # Real CVC CCTP (Océania, Quaero, IFO_MAR) are full of narrative
+        # sub-headings ("Généralités", "Principe", "Acoustique"...) that a
+        # real economist never turns into a DPGF line — only their genuine
+        # priceable children (if any) survive into the DPGF.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 12 CVC.docx"
+            document = Document()
+            document.add_heading("LOT 12 — CVC", level=1)
+            document.add_heading("4.1 DESCRIPTION DES OUVRAGES DE CVC", level=2)
+            document.add_heading("4.1.1 Généralités", level=3)
+            document.add_paragraph("Le présent lot comprend la fourniture et la pose.")
+            document.add_heading("4.1.2 Acoustique", level=3)
+            document.add_paragraph("Les niveaux sonores respectent la réglementation.")
+            document.add_heading("4.2 Production de chauffage", level=2)
+            document.add_heading("4.2.1 Vase d'expansion", level=3)
+            document.add_paragraph("Fourniture et pose, quantité 2.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_generic_titles")
+
+        designations = {line["designation"] for line in lot["lines"]}
+        self.assertNotIn("Généralités", designations)
+        self.assertNotIn("Acoustique", designations)
+        self.assertIn("Vase d'expansion", designations)
+
+    def test_cvc_family_units_mined_from_real_dpgf(self) -> None:
+        # Validated against 96 real CVC projects mined from
+        # /Volumes/PARTAGE/ME/B_PROJETS (17 617 designation/unit pairs) — a
+        # first pass based on only 3 CCTP/DPGF wrongly concluded "réseaux
+        # aérauliques" → ml (real large-scale purity: 80 % Ens, not ml) and
+        # found no real support for "passerelle"/"automate" (both dropped,
+        # not replaced — see FAMILY_UNIT_OVERRIDES["cvc"] comment).
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 12 CVC.docx"
+            document = Document()
+            document.add_heading("LOT 12 — CVC", level=1)
+            document.add_heading("4.1 DESCRIPTION DES OUVRAGES DE CVC", level=2)
+            document.add_heading("4.1.1 Réseaux aérauliques", level=3)
+            document.add_paragraph("Réseau de gaines, section rectangulaire et circulaire.")
+            document.add_heading("4.1.2 Vase d'expansion", level=3)
+            document.add_paragraph("Fourniture et pose, quantité 2.")
+            document.add_heading("4.1.3 Caisson d'extraction", level=3)
+            document.add_paragraph("Caisson avec équipements et accessoires.")
+            document.add_heading("4.1.4 Boitier de répartition", level=3)
+            document.add_paragraph("Boîtier maître, quantité 1.")
+            document.add_heading("4.1.5 Soupape de sécurité", level=3)
+            document.add_paragraph("Fourniture et pose, quantité 1.")
+            document.add_heading("4.1.6 Désemboueur magnétique", level=3)
+            document.add_paragraph("Complet, quantité 1.")
+            document.add_heading("4.1.7 Régulation", level=3)
+            document.add_paragraph("Régulation de l'installation.")
+            document.add_heading("4.1.8 Collecteur départ retour", level=3)
+            document.add_paragraph("Collecteur avec équipements.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_cvc_units")
+
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Réseaux aérauliques"]["unit"], "Ens")
+        self.assertEqual(by_designation["Vase d'expansion"]["unit"], "U")
+        self.assertEqual(by_designation["Caisson d'extraction"]["unit"], "U")
+        self.assertEqual(by_designation["Boitier de répartition"]["unit"], "U")
+        self.assertEqual(by_designation["Soupape de sécurité"]["unit"], "U")
+        self.assertEqual(by_designation["Désemboueur magnétique"]["unit"], "U")
+        self.assertEqual(by_designation["Régulation"]["unit"], "Ens")
+        self.assertEqual(by_designation["Collecteur départ retour"]["unit"], "Ens")
+
+    def test_lot_pattern_accepts_missing_separator_after_code(self) -> None:
+        # Real IFO_MAR CCTP text: "E-206 - CCTP LOT 6 CVC - DESENFUMAGE" — no
+        # dash/colon directly after the lot code, just a space before the
+        # title ("CVC - DESENFUMAGE"); the dash there belongs to the title
+        # itself, not to the code/title separator.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 06 CVC-DESENFUMAGE.docx"
+            document = Document()
+            document.add_paragraph("E-206 - CCTP LOT 6 CVC - DESENFUMAGE")
+            document.add_heading("Description des ouvrages de chauffage", level=1)
+            document.add_heading("2.1 Généralités", level=2)
+            document.add_paragraph("Texte de généralités.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_lot_identity")
+
+        self.assertEqual(lot["code"], "06")
+        self.assertIn("CVC", lot["title"])
+        self.assertIn("DESENFUMAGE", lot["title"])
+
     def test_decomposition_rule_adds_flagged_extra_lines(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "CCTP LOT 15 CVC.docx"
@@ -790,6 +877,65 @@ class ApiFlowTests(unittest.TestCase):
         finally:
             client.delete(f"/api/v1/analyses/{analysis_id}")
 
+    def test_pm_unit_is_accepted_and_preserved(self) -> None:
+        # "PM" (Pour Mémoire) is a real unit in real DPGF (Quaero, IFO_MAR)
+        # for provisional/informational lines — save_analysis must not
+        # silently coerce it back to "Ens" like it does for unknown units.
+        client = TestClient(app)
+        buffer = BytesIO()
+        document = Document()
+        document.add_heading("LOT 12 — CVC", level=1)
+        document.add_heading("4.1 DESCRIPTION DES OUVRAGES DE CVC", level=2)
+        document.add_heading("4.1.1 Base de calcul", level=3)
+        document.add_paragraph("Bilan calorifique et frigorifique.")
+        document.save(buffer)
+        response = client.post(
+            "/api/v1/analyses",
+            data={"project_name": "Projet PM", "project_reference": "PM-001", "phase": "DCE"},
+            files=[
+                (
+                    "files",
+                    (
+                        "CCTP LOT 12.docx",
+                        buffer.getvalue(),
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    ),
+                ),
+            ],
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        analysis_id = response.json()["id"]
+        try:
+            payload = client.get(f"/api/v1/analyses/{analysis_id}").json()
+            lot = payload["lots"][0]
+            lot["lines"].append(
+                {
+                    "id": "manual_pm",
+                    "kind": "item",
+                    "level": 3,
+                    "code": "4.1.2",
+                    "designation": "Bilan calorifique et frigorifique",
+                    "unit": "PM",
+                    "quantity": None,
+                    "included": True,
+                    "review_status": "validated",
+                    "origin": "manual",
+                }
+            )
+            saved = client.put(
+                f"/api/v1/analyses/{analysis_id}",
+                json={"project": payload["project"], "lots": payload["lots"]},
+            )
+            self.assertEqual(saved.status_code, 200, saved.text)
+            saved_line = next(
+                line
+                for line in saved.json()["lots"][0]["lines"]
+                if line["id"] == "manual_pm"
+            )
+            self.assertEqual(saved_line["unit"], "PM")
+        finally:
+            client.delete(f"/api/v1/analyses/{analysis_id}")
+
 
 class MultiUserPermissionTests(unittest.TestCase):
     """DPGF Résumé CCTP is opt-in shared: an analysis is only visible to its
@@ -1141,6 +1287,18 @@ class LlmAssistTests(unittest.TestCase):
         ):
             result = llm_module.suggest_units([{"code": "a", "designation": "Foo"}])
         self.assertEqual(result, {})
+
+    def test_suggest_units_accepts_pm(self) -> None:
+        # "PM" (Pour Mémoire) is a real DPGF unit for provisional/
+        # informational lines (Quaero, IFO_MAR) — must not be rejected like
+        # a genuinely invalid unit ("litres" above).
+        with patch.object(llm_module, "available", return_value=True), patch.object(
+            llm_module,
+            "_chat_completion",
+            return_value='{"units": {"a": "PM"}}',
+        ):
+            result = llm_module.suggest_units([{"code": "a", "designation": "Base de calcul"}])
+        self.assertEqual(result, {"a": "PM"})
 
 
 if __name__ == "__main__":
