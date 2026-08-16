@@ -118,8 +118,11 @@ UNIT_RULES: list[tuple[str, float, re.Pattern[str]]] = [
         "m³",
         0.82,
         re.compile(
-            r"\b(?:terrassement|deblai|remblai|beton|grave|terre vegetale|"
-            r"fouille|evacuation des terres|longrines?)\b",
+            # "remblai" seul ne couvrait pas ses formes dérivées réelles
+            # ("remblaiements", très fréquent en Structure/Gros Œuvre :
+            # 97 % de pureté m³ sur 30 projets réels /Volumes/PARTAGE).
+            r"\b(?:terrassements?|deblais?|remblais?(?:ements?)?|betons?|grave|"
+            r"terre vegetale|fouilles?|evacuation des terres|longrines?)\b",
             re.IGNORECASE,
         ),
     ),
@@ -544,6 +547,94 @@ FAMILY_UNIT_OVERRIDES: dict[str, list[tuple[str, float, re.Pattern[str]]]] = {
             re.compile(r"\b(?:reseau|cables?|cablage|canalisations?)\b", re.IGNORECASE),
         ),
     ],
+    # Les 6 blocs suivants viennent du même minage réel à grande échelle que
+    # "cvc" ci-dessus (662 couples projet/oficio, /Volumes/PARTAGE/ME/B_PROJETS,
+    # 2026) — mots retenus seulement à ≥6 projets indépendants et ≥78 % de
+    # pureté dominante. La plupart du vocabulaire déjà couvert par UNIT_RULES
+    # (vanne, calorifuge, robinet, filtre, purgeur, clapet, manomètre,
+    # étanchéité, cloison, doublage, plafond, plâtre...) ressort exactement
+    # avec la même unité sur cet échantillon indépendant : bonne confirmation,
+    # aucun changement nécessaire là où c'est déjà couvert.
+    "fondations_gros_oeuvre": [
+        (
+            "m²",
+            0.85,
+            re.compile(r"\bmaconnerie\b", re.IGNORECASE),
+        ),
+        (
+            "U",
+            0.78,
+            re.compile(r"\bpanneau\w*\b", re.IGNORECASE),
+        ),
+        (
+            "Ens",
+            0.8,
+            re.compile(r"\bbranchements?\b|\bconstat\b", re.IGNORECASE),
+        ),
+    ],
+    "plomberie_sanitaire": [
+        (
+            "Ens",
+            0.88,
+            re.compile(r"\bdegorgements?\b|\btampons?\b|\bcondensation\b", re.IGNORECASE),
+        ),
+        (
+            "ml",
+            0.85,
+            re.compile(r"\bdiam\b", re.IGNORECASE),
+        ),
+    ],
+    "serrurerie_metallerie": [
+        (
+            "U",
+            0.85,
+            re.compile(
+                r"\bvantaux\b|\bvantail\b|\bportillons?\b|\bbutoirs?\b",
+                re.IGNORECASE,
+            ),
+        ),
+    ],
+    "couverture_etancheite_bardage": [
+        (
+            "ml",
+            0.85,
+            re.compile(r"\bcouvertines?\b", re.IGNORECASE),
+        ),
+        (
+            "ml",
+            0.78,
+            # Contredit la règle générique ("descente" penche vers U tous
+            # lots confondus) : en couverture/bardage il s'agit quasi
+            # toujours de descentes d'eaux pluviales facturées au mètre
+            # linéaire (80 % ml, 10 projets réels) — cas d'école de mot
+            # ambigu au global mais pur une fois le lot connu.
+            re.compile(r"\bdescentes?\b", re.IGNORECASE),
+        ),
+    ],
+    "menuiserie_exterieure": [
+        (
+            "U",
+            0.8,
+            re.compile(r"\bimpostes?\b", re.IGNORECASE),
+        ),
+        (
+            "ml",
+            0.72,
+            re.compile(r"\bappuis\b", re.IGNORECASE),
+        ),
+    ],
+    "menuiserie_interieure": [
+        (
+            "Ens",
+            0.8,
+            re.compile(r"\bsignaletique\b", re.IGNORECASE),
+        ),
+        (
+            "U",
+            0.72,
+            re.compile(r"\bplacards?\b", re.IGNORECASE),
+        ),
+    ],
 }
 
 # Séquence usuelle des corps d'état dans un DCE Moduo (démolition/VRD en tête,
@@ -710,6 +801,12 @@ def _normalized(value: str) -> str:
     # accent variants), so every regex keyed on "d'appui"/"d'étanchéité" and
     # every duplicate check silently missed half of real documents.
     value = _APOSTROPHES.sub("'", value)
+    # "œuvre" ("GROS ŒUVRE", correct French typography) uses the œ ligature
+    # (U+0153) — unlike accented letters, NFKD does NOT decompose it into
+    # "oe", so every regex written with plain "oeuvre" (LOT_FAMILY_RULES,
+    # UNIT_RULES...) was silently failing to match real CCTP using it.
+    value = value.replace("œ", "oe").replace("Œ", "OE")
+    value = value.replace("æ", "ae").replace("Æ", "AE")
     return re.sub(r"\s+", " ", value).strip().casefold()
 
 

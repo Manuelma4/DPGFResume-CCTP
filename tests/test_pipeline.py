@@ -178,6 +178,27 @@ class ExtractionTests(unittest.TestCase):
         by_designation = {line["designation"]: line for line in lot["lines"]}
         self.assertEqual(by_designation["Relevés d’étanchéité"]["unit"], "ml")
 
+    def test_oe_ligature_matches_plain_oe_rules(self) -> None:
+        # "GROS ŒUVRE" (correct French typography, œ = U+0153) does not
+        # decompose to "oe" under NFKD like an accented letter would — found
+        # while adding fondations_gros_oeuvre-specific unit rules: the lot
+        # family classifier silently returned "autre" for any real CCTP
+        # using the ligature, since LOT_FAMILY_RULES is written with plain
+        # "oeuvre". Same class of bug as the curly-apostrophe one above.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 03 GROS OEUVRE.docx"
+            document = Document()
+            document.add_heading("LOT 03 — GROS ŒUVRE", level=1)
+            document.add_heading("Description des ouvrages", level=1)
+            document.add_heading("Maçonnerie de remplissage", level=2)
+            document.add_paragraph("Fourniture et pose, quantité 40.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_oe_ligature")
+
+        self.assertEqual(lot["code"], "03")
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Maçonnerie de remplissage"]["unit"], "m²")
+
     def test_curly_apostrophe_prevents_duplicate_decomposition_line(self) -> None:
         # Same bug, but for the decomposition dedup check: the CCTP writes
         # out "Vanne d’isolement DN 15" (curly apostrophe) explicitly as its
@@ -390,6 +411,139 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(by_designation["Désemboueur magnétique"]["unit"], "U")
         self.assertEqual(by_designation["Régulation"]["unit"], "Ens")
         self.assertEqual(by_designation["Collecteur départ retour"]["unit"], "Ens")
+
+    def _lot_and_parse(
+        self, directory: str, filename: str, lot_heading: str, items: list[tuple[str, str]]
+    ) -> dict:
+        path = Path(directory) / filename
+        document = Document()
+        document.add_heading(lot_heading, level=1)
+        document.add_heading("1.1 DESCRIPTION DES OUVRAGES", level=2)
+        for index, (title, paragraph) in enumerate(items, start=1):
+            document.add_heading(f"1.1.{index} {title}", level=3)
+            document.add_paragraph(paragraph)
+        document.save(path)
+        return parse_document(extract_document(path), f"src_{filename}")
+
+    def test_str_family_units_mined_from_real_dpgf(self) -> None:
+        # Minage réel : 88 projets Structure/Gros Œuvre depuis
+        # /Volumes/PARTAGE/ME/B_PROJETS.
+        with tempfile.TemporaryDirectory() as directory:
+            lot = self._lot_and_parse(
+                directory,
+                "CCTP LOT 03 GROS OEUVRE.docx",
+                "LOT 03 — GROS ŒUVRE",
+                [
+                    ("Maçonnerie de remplissage", "Fourniture et pose, quantité 40."),
+                    ("Panneau de signalisation de chantier", "Fourniture et pose, quantité 2."),
+                    ("Branchements provisoires de chantier", "Ensemble, forfait."),
+                ],
+            )
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Maçonnerie de remplissage"]["unit"], "m²")
+        self.assertEqual(by_designation["Panneau de signalisation de chantier"]["unit"], "U")
+        self.assertEqual(by_designation["Branchements provisoires de chantier"]["unit"], "Ens")
+
+    def test_str_remblaiements_plural_now_covered(self) -> None:
+        # "remblai" seul ne matchait pas ses formes dérivées ("remblaiements",
+        # 97 % de pureté m³ sur 30 projets réels) — régression sur la règle
+        # générique élargie, pas sur une FAMILY_UNIT_OVERRIDES.
+        with tempfile.TemporaryDirectory() as directory:
+            lot = self._lot_and_parse(
+                directory,
+                "CCTP LOT 03 GROS OEUVRE.docx",
+                "LOT 03 — GROS ŒUVRE",
+                [("Remblaiements compactés", "Mise en œuvre, quantité 120.")],
+            )
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Remblaiements compactés"]["unit"], "m³")
+
+    def test_plomberie_family_units_mined_from_real_dpgf(self) -> None:
+        # Minage réel : 60 projets Plomberie/Sanitaire, le plus riche des 12
+        # oficios minés (120 candidats propres).
+        with tempfile.TemporaryDirectory() as directory:
+            lot = self._lot_and_parse(
+                directory,
+                "CCTP LOT 07 PLOMBERIE.docx",
+                "LOT 07 — PLOMBERIE SANITAIRE",
+                [
+                    ("Dégorgement des canalisations", "Ensemble, forfait."),
+                    ("Tampons de visite", "Fourniture et pose, quantité 3."),
+                    ("Tube acier diam 20/27", "Section courante, quantité 15."),
+                ],
+            )
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Dégorgement des canalisations"]["unit"], "Ens")
+        self.assertEqual(by_designation["Tampons de visite"]["unit"], "Ens")
+        self.assertEqual(by_designation["Tube acier diam 20/27"]["unit"], "ml")
+
+    def test_serrurerie_family_units_mined_from_real_dpgf(self) -> None:
+        # Minage réel : 67 projets Serrurerie/Métallerie.
+        with tempfile.TemporaryDirectory() as directory:
+            lot = self._lot_and_parse(
+                directory,
+                "CCTP LOT 09 SERRURERIE.docx",
+                "LOT 09 — SERRURERIE METALLERIE",
+                [
+                    ("Portillon métallique", "Fourniture et pose, quantité 1."),
+                    ("Vantail de porte coulissante", "Fourniture et pose, quantité 2."),
+                ],
+            )
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Portillon métallique"]["unit"], "U")
+        self.assertEqual(by_designation["Vantail de porte coulissante"]["unit"], "U")
+
+    def test_couverture_family_units_and_descente_family_conflict(self) -> None:
+        # Minage réel : 65 projets Couverture/Étanchéité/Bardage. "descente"
+        # penche vers U tous lots confondus, mais vers ml (80 %, 10 projets)
+        # une fois qu'on sait que le lot est couverture/bardage (descentes
+        # d'eaux pluviales facturées au mètre) — cas d'école pour
+        # FAMILY_UNIT_OVERRIDES.
+        with tempfile.TemporaryDirectory() as directory:
+            lot = self._lot_and_parse(
+                directory,
+                "CCTP LOT 04 COUVERTURE.docx",
+                "LOT 04 — COUVERTURE ETANCHEITE BARDAGE",
+                [
+                    ("Couvertines aluminium", "Fourniture et pose, quantité 25."),
+                    ("Descente eaux pluviales", "Fourniture et pose, quantité 12."),
+                ],
+            )
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Couvertines aluminium"]["unit"], "ml")
+        self.assertEqual(by_designation["Descente eaux pluviales"]["unit"], "ml")
+
+    def test_menuiserie_exterieure_family_units_mined_from_real_dpgf(self) -> None:
+        # Minage réel : 63 projets Menuiserie extérieure.
+        with tempfile.TemporaryDirectory() as directory:
+            lot = self._lot_and_parse(
+                directory,
+                "CCTP LOT 10 MENUISERIE EXT.docx",
+                "LOT 10 — MENUISERIE EXTERIEURE",
+                [
+                    ("Imposte fixe", "Fourniture et pose, quantité 4."),
+                    ("Appuis de fenêtre aluminium", "Fourniture et pose, quantité 8."),
+                ],
+            )
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Imposte fixe"]["unit"], "U")
+        self.assertEqual(by_designation["Appuis de fenêtre aluminium"]["unit"], "ml")
+
+    def test_menuiserie_interieure_family_units_mined_from_real_dpgf(self) -> None:
+        # Minage réel : 39 projets Menuiserie intérieure.
+        with tempfile.TemporaryDirectory() as directory:
+            lot = self._lot_and_parse(
+                directory,
+                "CCTP LOT 11 MENUISERIE INT.docx",
+                "LOT 11 — MENUISERIE INTERIEURE",
+                [
+                    ("Signalétique intérieure", "Ensemble, forfait."),
+                    ("Placard de rangement", "Fourniture et pose, quantité 2."),
+                ],
+            )
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Signalétique intérieure"]["unit"], "Ens")
+        self.assertEqual(by_designation["Placard de rangement"]["unit"], "U")
 
     def test_lot_pattern_accepts_missing_separator_after_code(self) -> None:
         # Real IFO_MAR CCTP text: "E-206 - CCTP LOT 6 CVC - DESENFUMAGE" — no
