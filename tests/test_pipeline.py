@@ -545,6 +545,73 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(by_designation["Signalétique intérieure"]["unit"], "Ens")
         self.assertEqual(by_designation["Placard de rangement"]["unit"], "U")
 
+    def test_cloisons_family_units_mined_from_real_dpgf(self) -> None:
+        # Minage réel : 58 projets Cloisons/Doublages/Plafonds.
+        with tempfile.TemporaryDirectory() as directory:
+            lot = self._lot_and_parse(
+                directory,
+                "CCTP LOT 12 CLOISONS.docx",
+                "LOT 12 — CLOISONS DOUBLAGES PLAFONDS",
+                [
+                    ("Parement hydrofuge", "Fourniture et pose, quantité 30."),
+                    ("Ossature métallique", "Fourniture et pose, quantité 25."),
+                ],
+            )
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Parement hydrofuge"]["unit"], "m²")
+        self.assertEqual(by_designation["Ossature métallique"]["unit"], "m²")
+
+    def test_peinture_family_units_and_beton_family_conflict(self) -> None:
+        # Minage réel : 59 projets Peinture. "beton" penche vers m³ (un
+        # volume coulé) tous lots confondus, mais vers m² (83 %, 12 projets)
+        # en peinture — c'est le support à peindre, jamais le volume — même
+        # cas d'école que "descente" en couverture ci-dessus.
+        with tempfile.TemporaryDirectory() as directory:
+            lot = self._lot_and_parse(
+                directory,
+                "CCTP LOT 13 PEINTURE.docx",
+                "LOT 13 — PEINTURE",
+                [
+                    ("Préparation des supports béton", "Ponçage et rebouchage, quantité 80."),
+                    ("Lasure sur bois", "Deux couches, quantité 20."),
+                ],
+            )
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Préparation des supports béton"]["unit"], "m²")
+        self.assertEqual(by_designation["Lasure sur bois"]["unit"], "m²")
+
+    def test_revetements_sols_family_units_mined_from_real_dpgf(self) -> None:
+        # Minage réel : 60 projets Revêtements de sols.
+        with tempfile.TemporaryDirectory() as directory:
+            lot = self._lot_and_parse(
+                directory,
+                "CCTP LOT 14 SOLS.docx",
+                "LOT 14 — REVETEMENTS DE SOLS",
+                [
+                    ("Siphon de sol", "Fourniture et pose, quantité 3."),
+                    ("Sous-couche acoustique", "Fourniture et pose, quantité 60."),
+                ],
+            )
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Siphon de sol"]["unit"], "U")
+        self.assertEqual(by_designation["Sous-couche acoustique"]["unit"], "m²")
+
+    def test_espaces_verts_family_units_mined_from_real_dpgf(self) -> None:
+        # Minage réel : 29 projets Espaces verts/Clôtures/Nettoyage.
+        with tempfile.TemporaryDirectory() as directory:
+            lot = self._lot_and_parse(
+                directory,
+                "CCTP LOT 15 ESPACES VERTS.docx",
+                "LOT 15 — ESPACES VERTS",
+                [
+                    ("Arbres tiges", "Fourniture et pose, quantité 12."),
+                    ("Paillage des massifs", "Mise en œuvre, quantité 50."),
+                ],
+            )
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertEqual(by_designation["Arbres tiges"]["unit"], "U")
+        self.assertEqual(by_designation["Paillage des massifs"]["unit"], "m²")
+
     def test_lot_pattern_accepts_missing_separator_after_code(self) -> None:
         # Real IFO_MAR CCTP text: "E-206 - CCTP LOT 6 CVC - DESENFUMAGE" — no
         # dash/colon directly after the lot code, just a space before the

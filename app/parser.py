@@ -635,6 +635,68 @@ FAMILY_UNIT_OVERRIDES: dict[str, list[tuple[str, float, re.Pattern[str]]]] = {
             re.compile(r"\bplacards?\b", re.IGNORECASE),
         ),
     ],
+    "cloisons_doublages_plafonds": [
+        (
+            "m²",
+            0.85,
+            re.compile(
+                r"\bhydrofuges?\b|\bparements?\b|\bossatures?\b|\bdalles?\b",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "U",
+            0.72,
+            re.compile(r"\bbloc\w*\b", re.IGNORECASE),
+        ),
+    ],
+    "peinture": [
+        (
+            "m²",
+            0.78,
+            # Contredit la règle générique ("beton" → m³, un volume) : en
+            # peinture, "béton" désigne quasi toujours le support à peindre
+            # (une surface, 83 % m², 12 projets réels), jamais le volume
+            # coulé — même logique que "descente" en couverture ci-dessus.
+            re.compile(r"\bbetons?\b", re.IGNORECASE),
+        ),
+        (
+            "m²",
+            0.82,
+            re.compile(
+                r"\bsupports?\b|\bpreparations?\b|\bparois\b|\blasures?\b|"
+                r"\bbatis\b",
+                re.IGNORECASE,
+            ),
+        ),
+    ],
+    "revetements_sols": [
+        (
+            "U",
+            0.8,
+            re.compile(r"\bsiphons?\b", re.IGNORECASE),
+        ),
+        (
+            "m²",
+            0.78,
+            # Ne recoupe pas la règle prioritaire "isolation acoustique" →
+            # Ens (qui exige le mot "isolation") : ici "acoustique" seul
+            # décrit une sous-couche résiliente de sol, facturée au m².
+            re.compile(r"\bacoustique\b", re.IGNORECASE),
+        ),
+    ],
+    "espaces_verts_clotures_nettoyage": [
+        (
+            "U",
+            0.75,
+            re.compile(r"\barbres?\b", re.IGNORECASE),
+        ),
+        (
+            "m²",
+            0.75,
+            re.compile(r"\bpaillages?\b", re.IGNORECASE),
+        ),
+    ],
 }
 
 # Séquence usuelle des corps d'état dans un DCE Moduo (démolition/VRD en tête,
