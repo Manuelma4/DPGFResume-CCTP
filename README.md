@@ -165,10 +165,56 @@ Les instructions WinSCP, Docker, Apache et TLS se trouvent dans
 La validation compile le backend, exécute les tests extraction/API/Excel et compile
 le frontend React.
 
+## Banc d'essai CCTP → DPGF
+
+L'extraction se mesure contre des DPGF réellement livrés par l'économiste pour
+le même lot, sinon « ça s'est amélioré » reste une opinion.
+
+```powershell
+.venv\Scripts\python.exe tools\benchmark.py corpus
+.venv\Scripts\python.exe tools\benchmark.py corpus --detail   # ligne à ligne
+```
+
+Un sous-dossier par couple, contenant le CCTP (`.docx`/`.pdf`) et le DPGF de
+référence (`.xlsx`). Le dossier `corpus/` n'est pas versionné : ce sont des
+pièces de projets clients.
+
+Trois indicateurs :
+
+- **rappel** — postes du DPGF réel effectivement retrouvés ;
+- **précision** — lignes générées qui existent vraiment dans le DPGF livré ;
+- **unité** — unité correcte parmi les postes retrouvés.
+
+Référence VRD (Orchies, Norauto Limoges, Keolis Charny — 376 postes livrés) :
+
+| | avant | après |
+|---|---:|---:|
+| rappel | 45 % | 54 % |
+| précision | 47 % | 50 % |
+| unité | 65 % | 92 % |
+
+## Squelette de corps d'état
+
+Une part importante d'un DPGF n'est pas extractible du CCTP : celui-ci prescrit
+la manière de faire et renvoie aux plans pour le détail chiffrable (« les
+diamètres sont spécifiés sur le plan des travaux assainissement »). Trois DPGF
+VRD de trois projets sans rapport partagent pourtant 58 à 65 % de leurs lignes.
+
+`LOT_SKELETONS` complète donc chaque chapitre **déjà traité par le CCTP** avec
+les postes standard du corps d'état. Ces lignes portent `origin="skeleton"`,
+n'ont aucun extrait source et restent toujours à confirmer : elles livrent un
+cadre de chiffrage complet, elles ne prétendent jamais avoir été lues.
+
+Un chapitre absent du CCTP n'est jamais inventé.
+
 
 ## Limites connues
 
-- les fichiers Word historiques `.doc` doivent être convertis en `.docx` ;
+- les fichiers Word historiques `.doc` doivent être convertis en `.docx` — sur
+  le corpus de référence, deux CCTP sur trois arrivent dans ce format ;
+- une part du DPGF livré n'est pas dans le CCTP (diamètres, types, classes
+  renvoyés aux plans) : le squelette de corps d'état la couvre en partie, le
+  reste demande les plans ;
 - les PDF scannés sans couche texte sont signalés et nécessiteront un service OCR ;
 - une quantité qui n'est pas explicitement écrite dans le CCTP reste vide ;
 - l'utilisateur reste responsable de la validation économique avant diffusion.

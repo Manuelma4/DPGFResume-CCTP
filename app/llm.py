@@ -38,7 +38,10 @@ chiffré). Réponds uniquement par un objet JSON
 jamais une unité hors de cette liste et n'ajoute pas de code absent de la
 liste fournie."""
 
-ALLOWED_UNITS = {"m²", "m³", "ml", "U", "Ens", "kg", "PM"}
+# "Ft" (forfait) est la notation des DPGF VRD livrés ; les autres corps d'état
+# écrivent "Ens". Les deux sont acceptées ici, la conversion vers la notation
+# du lot étant faite par parser._family_unit.
+ALLOWED_UNITS = {"m²", "m³", "ml", "U", "Ens", "Ft", "kg", "PM"}
 
 
 def available() -> bool:

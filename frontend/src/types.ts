@@ -54,7 +54,7 @@ export interface DpgfLine {
   source_page: number | null;
   source_excerpt: string;
   origin: string;
-  unit_source?: 'explicit' | 'rule' | 'default' | null;
+  unit_source?: 'explicit' | 'rule' | 'llm' | 'skeleton' | 'default' | null;
   unit_confidence?: number | null;
   quantity_source?: 'explicit' | 'missing' | null;
   review_fields?: string[];

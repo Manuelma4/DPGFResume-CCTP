@@ -8,3 +8,6 @@ frontend/dist/
 output/*
 !output/.gitkeep
 
+
+# Corpus de reference (CCTP + DPGF reels) : donnees client, hors depot.
+corpus/

@@ -5,6 +5,8 @@ import mimetypes
 import re
 import shutil
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -31,6 +33,8 @@ from .excel_export import (
 )
 from .extractors import extract_document
 from .parser import (
+    classify_lot_family,
+    family_unit,
     list_heading_candidates,
     lot_sort_key,
     parse_document,
@@ -233,12 +237,16 @@ def _apply_unit_assist(lot: dict[str, Any]) -> bool:
     if not suggestions:
         return False
     by_id = {line["id"]: line for line in default_lines}
+    # Le modèle ignore la notation du corps d'état : il répond "Ens" là où un
+    # DPGF VRD écrit "Ft". La conversion est faite ici, comme pour les unités
+    # déterministes.
+    lot_family = classify_lot_family(str(lot.get("title") or ""))[0]
     applied = False
     for line_id, unit in suggestions.items():
         line = by_id.get(line_id)
         if line is None:
             continue
-        line["unit"] = unit
+        line["unit"] = family_unit(unit, lot_family)
         line["unit_source"] = "llm"
         line["unit_confidence"] = 0.7
         applied = True
@@ -266,10 +274,22 @@ def _merge_llm_result(
         target = by_code.get(code) if code else by_title.get(title.casefold())
         if not target:
             continue
-        for key in ("designation", "unit", "quantity", "review_reason"):
+        for key in ("designation", "review_reason"):
             value = suggestion.get(key)
             if value not in (None, ""):
                 target[key] = value
+        # "quantity" n'est délibérément plus repris : une quantité qui n'est
+        # pas écrite noir sur blanc dans le CCTP doit rester vide (c'est la
+        # promesse faite dans le README), et rien ici ne permet de vérifier
+        # qu'une valeur proposée par le modèle vient bien de la source.
+        suggested_unit = suggestion.get("unit")
+        if suggested_unit in llm.ALLOWED_UNITS:
+            # Même filtrage que suggest_units : une unité hors nomenclature
+            # est écartée, et l'origine est tracée pour que les statistiques
+            # ne la comptent pas comme une unité déterministe.
+            target["unit"] = suggested_unit
+            target["unit_source"] = "llm"
+            target["unit_confidence"] = 0.7
         try:
             target["confidence"] = max(
                 float(target.get("confidence") or 0),
@@ -334,6 +354,91 @@ def _restore_user_content(
     return lot
 
 
+@dataclass
+class _SourceOutcome:
+    """Résultat du traitement d'un CCTP, isolé du stockage.
+
+    Les documents d'un dossier sont indépendants les uns des autres : ils sont
+    donc traités en parallèle. Tout ce qui touche à SQLite reste en revanche
+    dans le thread appelant, cette structure ne transportant que des données.
+    """
+
+    index: int
+    source: dict[str, Any]
+    lot: dict[str, Any] | None = None
+    warnings: list[dict[str, Any]] = dataclass_field(default_factory=list)
+    perimeter_assisted: bool = False
+    unit_assisted: bool = False
+    refined: bool = False
+
+
+def _process_source(
+    analysis_id: str,
+    index: int,
+    source: dict[str, Any],
+    previous_lot: dict[str, Any] | None,
+    preserve_user_content: bool,
+) -> _SourceOutcome:
+    outcome = _SourceOutcome(index=index, source=source)
+    path = store.source_directory(analysis_id) / source["stored_name"]
+    try:
+        extracted = extract_document(path)
+        source["page_count"] = extracted.page_count
+        source["character_count"] = extracted.character_count
+        source["status"] = "processed"
+        lot = parse_document(extracted, source["id"])
+        if llm.available() and extracted.character_count:
+            try:
+                lot, outcome.perimeter_assisted = _apply_perimeter_assist(
+                    extracted, source["id"], lot
+                )
+            except Exception as exc:
+                lot.setdefault("warnings", []).append(
+                    f"Assistance LIHA (périmètre) indisponible : "
+                    f"{type(exc).__name__}. L'extraction déterministe a été "
+                    "conservée."
+                )
+            if config.LLM_DEEP_REFINE:
+                try:
+                    lot = _merge_llm_result(lot, llm.refine(extracted.text, lot))
+                    outcome.refined = True
+                except Exception as exc:
+                    lot.setdefault("warnings", []).append(
+                        f"Assistance LIHA indisponible : {type(exc).__name__}. "
+                        "L'extraction déterministe a été conservée."
+                    )
+            try:
+                outcome.unit_assisted = _apply_unit_assist(lot)
+            except Exception as exc:
+                lot.setdefault("warnings", []).append(
+                    f"Assistance LIHA (unité) indisponible : "
+                    f"{type(exc).__name__}. Les unités par défaut ont été "
+                    "conservées."
+                )
+        if preserve_user_content:
+            lot = _restore_user_content(lot, previous_lot)
+        outcome.lot = lot
+        outcome.warnings = [
+            {
+                "source_id": source["id"],
+                "source_name": source["original_name"],
+                "message": warning,
+            }
+            for warning in lot.get("warnings") or []
+        ]
+    except Exception as exc:
+        source["status"] = "failed"
+        source["error"] = str(exc)
+        outcome.warnings = [
+            {
+                "source_id": source["id"],
+                "source_name": source["original_name"],
+                "message": f"Document non traité : {exc}",
+            }
+        ]
+    return outcome
+
+
 def process_analysis(
     analysis_id: str, preserve_user_content: bool = False
 ) -> None:
@@ -352,77 +457,49 @@ def process_analysis(
         llm_perimeter_assist_used = False
         llm_unit_assist_used = False
         documents = analysis.get("documents") or []
-        for index, source in enumerate(documents):
-            path = store.source_directory(analysis_id) / source["stored_name"]
-            try:
-                extracted = extract_document(path)
-                source["page_count"] = extracted.page_count
-                source["character_count"] = extracted.character_count
-                source["status"] = "processed"
-                lot = parse_document(extracted, source["id"])
-                if llm.available() and extracted.character_count:
-                    try:
-                        lot, perimeter_assisted = _apply_perimeter_assist(
-                            extracted, source["id"], lot
-                        )
-                        if perimeter_assisted:
-                            llm_perimeter_assist_used = True
-                    except Exception as exc:
-                        lot.setdefault("warnings", []).append(
-                            f"Assistance LIHA (périmètre) indisponible : "
-                            f"{type(exc).__name__}. L'extraction déterministe a été "
-                            "conservée."
-                        )
-                    try:
-                        refined = llm.refine(extracted.text, lot)
-                        lot = _merge_llm_result(lot, refined)
-                        llm_used = True
-                    except Exception as exc:
-                        lot.setdefault("warnings", []).append(
-                            f"Assistance LIHA indisponible : {type(exc).__name__}. "
-                            "L'extraction déterministe a été conservée."
-                        )
-                    try:
-                        if _apply_unit_assist(lot):
-                            llm_unit_assist_used = True
-                    except Exception as exc:
-                        lot.setdefault("warnings", []).append(
-                            f"Assistance LIHA (unité) indisponible : "
-                            f"{type(exc).__name__}. Les unités par défaut ont été "
-                            "conservées."
-                        )
-                if preserve_user_content:
-                    lot = _restore_user_content(
-                        lot, previous_lots.get(str(source.get("id") or ""))
-                    )
-                lots.append(lot)
-                for warning in lot.get("warnings") or []:
-                    warnings.append(
-                        {
-                            "source_id": source["id"],
-                            "source_name": source["original_name"],
-                            "message": warning,
-                        }
-                    )
-            except Exception as exc:
-                source["status"] = "failed"
-                source["error"] = str(exc)
-                warnings.append(
-                    {
-                        "source_id": source["id"],
-                        "source_name": source["original_name"],
-                        "message": f"Document non traité : {exc}",
-                    }
+        outcomes: list[_SourceOutcome] = []
+        # Mesuré sur 12 CCTP Word réels : en déterministe pur, paralléliser
+        # ralentit (9,6 s -> 13,5 s). python-docx est du Python pur, les
+        # threads ne font que se disputer le GIL. Le parallélisme ne paie que
+        # lorsqu'il y a de l'attente réseau, c'est-à-dire quand l'assistance
+        # LIHA est active — un appel par document, pendant lequel le GIL est
+        # relâché.
+        workers = (
+            max(1, min(config.PROCESSING_WORKERS, len(documents) or 1))
+            if llm.available()
+            else 1
+        )
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(
+                    _process_source,
+                    analysis_id,
+                    index,
+                    source,
+                    previous_lots.get(str(source.get("id") or "")),
+                    preserve_user_content,
                 )
-            progress = 10 + round((index + 1) / max(1, len(documents)) * 78)
-            analysis["lots"] = lots
-            analysis["warnings"] = warnings
-            analysis = store.update_analysis(
-                analysis_id,
-                analysis,
-                status="processing",
-                progress=progress,
-            )
+                for index, source in enumerate(documents)
+            ]
+            for completed, future in enumerate(as_completed(futures), start=1):
+                outcomes.append(future.result())
+                # L'ordre d'arrivée n'est plus l'ordre du dossier : on ne
+                # publie que l'avancement ici, les lots sont assemblés dans
+                # l'ordre des documents une fois tout terminé.
+                analysis = store.update_analysis(
+                    analysis_id,
+                    analysis,
+                    status="processing",
+                    progress=10 + round(completed / max(1, len(documents)) * 78),
+                )
+
+        for outcome in sorted(outcomes, key=lambda item: item.index):
+            if outcome.lot is not None:
+                lots.append(outcome.lot)
+            warnings.extend(outcome.warnings)
+            llm_perimeter_assist_used |= outcome.perimeter_assisted
+            llm_unit_assist_used |= outcome.unit_assisted
+            llm_used |= outcome.refined
 
         if not lots:
             raise ValueError("Aucun CCTP n'a pu être traité")

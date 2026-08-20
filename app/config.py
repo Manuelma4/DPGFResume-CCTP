@@ -85,7 +85,32 @@ LLM_MAX_CHARS = int(ENV.get("DPGF_LLM_MAX_CHARS", "65000") or 65000)
 # Timeout séparé pour les assistances ciblées (confirmation de périmètre,
 # suggestion d'unité) : prompts courts, doivent rester rapides même si
 # refine() (document entier) a un budget plus large.
-LLM_SUGGEST_TIMEOUT = float(ENV.get("LIHA_RULES_SUGGEST_TIMEOUT_SECONDS", "60") or 60)
+#
+# Plafonné : une valeur héritée de la configuration partagée
+# (LIHA_RULES_SUGGEST_TIMEOUT_SECONDS=700, pensée pour un autre usage)
+# autorisait 700 s d'attente par appel et par document, soit plus de 25
+# minutes de blocage pour un seul CCTP avant de se rabattre sur le
+# déterministe. Au-delà de deux minutes, l'assistance n'a plus d'intérêt :
+# mieux vaut rendre le résultat déterministe tout de suite.
+LLM_SUGGEST_TIMEOUT = min(
+    float(ENV.get("LIHA_RULES_SUGGEST_TIMEOUT_SECONDS", "45") or 45),
+    float(ENV.get("DPGF_LLM_SUGGEST_TIMEOUT_CAP", "120") or 120),
+)
+
+# refine() envoie le document entier (jusqu'à LLM_MAX_CHARS) et demande
+# jusqu'à 12 000 tokens de réponse : c'est de loin l'appel le plus coûteux du
+# pipeline. Or _merge_llm_result ne sait que réécrire des champs de lignes
+# déjà trouvées — une ligne proposée sans correspondance déterministe est
+# ignorée. Sur un lot inconnu, là où il manque justement des lignes, cet
+# appel ne peut donc rien apporter. Il reste disponible pour l'expérimentation
+# mais n'est plus dans le chemin par défaut.
+LLM_DEEP_REFINE = env_bool("DPGF_LLM_DEEP_REFINE", False)
+
+# Les CCTP d'un même dossier sont indépendants : ils sont traités en
+# parallèle. Le gain est net dès que l'assistance LIHA est active (attente
+# réseau), et reste sensible sur les PDF (PyMuPDF libère le GIL pendant
+# l'extraction).
+PROCESSING_WORKERS = max(1, int(ENV.get("DPGF_PROCESSING_WORKERS", "4") or 4))
 
 MAX_FILE_BYTES = int(float(ENV.get("DPGF_MAX_FILE_MB", "80") or 80) * 1024 * 1024)
 MAX_DOCUMENTS = int(ENV.get("DPGF_MAX_DOCUMENTS", "30") or 30)

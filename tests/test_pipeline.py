@@ -16,6 +16,7 @@ from openpyxl import load_workbook
 from app import auth, config, store
 from app import directory as directory_module
 from app import llm as llm_module
+from app import parser as parser_module
 from app.excel_export import export_analysis, export_analysis_files
 from app.extractors import extract_document
 from app.main import _apply_perimeter_assist, _apply_unit_assist, app
@@ -132,6 +133,114 @@ class ExtractionTests(unittest.TestCase):
             by_designation["Carrelage grès cérame 45 x 45"]["code"], "1.2.1"
         )
         self.assertEqual(lot["perimeter"]["method"], "explicit_anchor")
+
+    def test_demolition_orphan_headings_recover_priceable_plain_paragraphs(self) -> None:
+        # Real demolition CCTP templates can reserve Heading 1 for a missing
+        # parent chapter: every visible chapter is Heading 2, while the actual
+        # strip-out rows are plain paragraphs immediately followed by
+        # "Nature des prestations". The trade family, not the lot number,
+        # activates this recovery pass.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 01 DEMOLITION CURAGE DESAMIANTAGE.docx"
+            document = Document()
+            document.styles.add_style("Default", WD_STYLE_TYPE.PARAGRAPH)
+            document.add_paragraph("CCTP Lot n°01 - Démolition - Curage - Désamiantage")
+            document.add_heading("Qualifications qualibat", level=2)
+            document.add_paragraph("Prescriptions administratives.")
+            document.add_heading("Installation de chantier", level=2)
+            document.add_paragraph("Base vie - Roulotte")
+            document.add_paragraph("Roulotte autonome avec vestiaire et sanitaires.")
+            document.add_paragraph("Neutralisation des réseaux concessionnaires")
+            document.add_paragraph("Neutralisation de l'eau, du gaz et de l'électricité.")
+            document.add_heading("Travaux de désamiantage", level=2)
+            document.add_paragraph("Retrait suivant le diagnostic amiante.")
+            document.add_paragraph("Localisation :")
+            document.add_paragraph(
+                "Colle bitumineuse sous revêtement de sol PVC", style="Default"
+            )
+            document.add_paragraph("Conduit en fibres-ciment", style="Default")
+            document.add_heading("Travaux de déplombage", level=2)
+            document.add_paragraph("Sans Objet.")
+            document.add_heading("Travaux de curage", level=2)
+            document.add_paragraph("Dépose des cloisons légères et doublages")
+            document.add_paragraph("Nature des prestations")
+            document.add_paragraph("Dépose complète et évacuation.")
+            document.add_paragraph("Dépose des menuiseries intérieures")
+            document.add_paragraph("Nature des prestations")
+            document.add_paragraph("Dépose complète et évacuation.")
+            document.add_heading("Travaux de déconstruction", level=2)
+            document.add_paragraph("Démolitions du bâtiment complet")
+            document.add_paragraph("Nature des prestations")
+            document.add_paragraph("Déconstruction et évacuation.")
+            document.add_heading("Nettoyage de fin de chantier", level=2)
+            document.add_paragraph("Nettoyage des voiries et abords.")
+            document.add_heading("Compte prorata", level=2)
+            document.add_paragraph("Participation de 1,5 %.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_demolition_real_shape")
+
+        self.assertEqual(lot["code"], "01")
+        self.assertEqual(classify_lot_family(lot["title"])[0], "desamiantage_demolition")
+        self.assertEqual(lot["perimeter"]["method"], "trade_work_anchor")
+        self.assertEqual(lot["perimeter"]["anchor_title"], "Installation de chantier")
+        self.assertEqual(lot["perimeter"]["anchor_code"], "3.1")
+        by_designation = {line["designation"]: line for line in lot["lines"]}
+        self.assertNotIn("Qualifications qualibat", by_designation)
+        self.assertNotIn("Travaux de déplombage", by_designation)
+        self.assertEqual(by_designation["Installation de chantier"]["kind"], "section")
+        self.assertEqual(by_designation["Installation de chantier"]["code"], "3.1")
+        self.assertEqual(by_designation["Base vie - Roulotte"]["code"], "3.1.1")
+        self.assertEqual(
+            by_designation["Neutralisation des réseaux concessionnaires"]["code"],
+            "3.1.2",
+        )
+        self.assertEqual(by_designation["Travaux de désamiantage"]["code"], "3.2")
+        self.assertEqual(
+            by_designation["Colle bitumineuse sous revêtement de sol PVC"]["code"],
+            "3.2.1",
+        )
+        self.assertEqual(by_designation["Travaux de curage"]["code"], "3.3")
+        self.assertEqual(
+            by_designation["Dépose des cloisons légères et doublages"]["code"],
+            "3.3.1",
+        )
+        self.assertEqual(
+            by_designation["Dépose des cloisons légères et doublages"]["unit"],
+            "m²",
+        )
+        self.assertEqual(
+            by_designation["Dépose des menuiseries intérieures"]["unit"], "U"
+        )
+        self.assertEqual(by_designation["Conduit en fibres-ciment"]["unit"], "ml")
+        self.assertEqual(by_designation["Compte prorata"]["unit"], "PM")
+        self.assertTrue(all(not line["code"].startswith("0") for line in lot["lines"]))
+        self.assertTrue(
+            all(
+                line.get("unit_source") != "default"
+                for line in lot["lines"]
+                if line["kind"] == "item"
+            )
+        )
+        with tempfile.TemporaryDirectory() as export_directory:
+            output = Path(export_directory) / "DPGF-demolition-numbering.xlsx"
+            export_analysis(sample_analysis(lot), output)
+            worksheet = load_workbook(output, data_only=False).active
+            exported_codes = {
+                str(worksheet.cell(row, 2).value or "")
+                for row in range(1, worksheet.max_row + 1)
+            }
+            subtotal_labels = {
+                str(worksheet.cell(row, 3).value or "")
+                for row in range(1, worksheet.max_row + 1)
+                if str(worksheet.cell(row, 3).value or "").startswith("Sous-total")
+            }
+        self.assertIn("3.1", exported_codes)
+        self.assertIn("3.1.1", exported_codes)
+        self.assertIn("3.2.1", exported_codes)
+        self.assertIn("3.3.1", exported_codes)
+        self.assertIn("Sous-total 3.1", subtotal_labels)
+        self.assertIn("Sous-total 3.2", subtotal_labels)
+        self.assertNotIn("Sous-total 3.1.1", subtotal_labels)
 
     def test_only_x_and_x_x_codes_are_titles_even_with_numbered_children(self) -> None:
         # Real DPGF only bold-title "x" chapters and "x.x" sub-chapters (e.g.
@@ -631,6 +740,107 @@ class ExtractionTests(unittest.TestCase):
         self.assertIn("CVC", lot["title"])
         self.assertIn("DESENFUMAGE", lot["title"])
 
+    def test_filename_lot_number_beats_a_copied_cover_page(self) -> None:
+        # Cas réel : un "CCTP LOT 03 - Clôtures et portails" monté en copiant
+        # le gabarit du lot VRD garde en page de garde "CCTP Lot n°02 — Voirie
+        # et Réseaux Divers". En croyant le texte, le lot était classé en
+        # famille "vrd" et recevait des règles d'unité sans rapport, sans
+        # aucun signalement.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 03 - Clôtures et portails.docx"
+            document = Document()
+            document.add_paragraph("CCTP Lot n°02 – Voirie et Réseaux Divers")
+            document.add_heading("3 Description des ouvrages", level=1)
+            document.add_heading("3.1 Clôture panneaux à plis", level=2)
+            document.add_paragraph("Nature des prestations : fourniture et pose.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_identity_conflict")
+
+        self.assertEqual(lot["code"], "03")
+        self.assertIn("Clôtures", lot["title"])
+        self.assertEqual(
+            classify_lot_family(lot["title"])[0], "espaces_verts_clotures_nettoyage"
+        )
+        self.assertTrue(
+            any("lot 02" in warning.casefold() for warning in lot["warnings"]),
+            "le désaccord page de garde / nom de fichier doit être signalé",
+        )
+
+    def test_cover_page_lot_is_kept_when_it_agrees_with_the_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 05 - Menuiseries.docx"
+            document = Document()
+            document.add_paragraph("CCTP Lot n°05 – Menuiseries extérieures alu")
+            document.add_heading("3 Description des ouvrages", level=1)
+            document.add_heading("3.1 Châssis fixe", level=2)
+            document.add_paragraph("Fourniture et pose.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_identity_ok")
+
+        self.assertEqual(lot["code"], "05")
+        # L'intitulé du document reste préféré : il est plus descriptif que le
+        # nom de fichier dès lors qu'il désigne bien le même lot.
+        self.assertIn("extérieures", lot["title"])
+        self.assertEqual(lot["warnings"], [])
+
+    def test_richest_chapter_wins_over_administrative_lookalike(self) -> None:
+        # CCTP Orchies : le chapitre "1 CONSISTANCE ET DESCRIPTION DES TRAVAUX"
+        # n'annonce que l'objet et le contenu du prix, tandis que "2
+        # DESCRIPTION ET LOCALISATION DES OUVRAGES" porte tout l'ouvrage
+        # chiffrable. Prendre la première correspondance sélectionnait le
+        # chapitre administratif et produisait 1 poste au lieu de 50 — avec
+        # une confiance affichée de 0,98.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 01 - VRD.docx"
+            document = Document()
+            document.add_heading("1 CONSISTANCE ET DESCRIPTION DES TRAVAUX", level=1)
+            document.add_heading("1.1 Objet", level=2)
+            document.add_paragraph("Le présent CCTP définit les travaux.")
+            document.add_heading("1.2 Contenu du prix", level=2)
+            document.add_paragraph("Les prix comprennent toutes sujétions.")
+            document.add_heading("2 DESCRIPTION ET LOCALISATION DES OUVRAGES", level=1)
+            document.add_heading("2.1 Travaux généraux", level=2)
+            document.add_heading("2.1.1 Constat d'huissier", level=3)
+            document.add_paragraph("Nature des prestations : constat avant travaux.")
+            document.add_heading("2.1.2 Sondage", level=3)
+            document.add_paragraph("Nature des prestations : sondages de sol.")
+            document.add_heading("2.2 Terrassements", level=2)
+            document.add_heading("2.2.1 Décapage de terre végétale", level=3)
+            document.add_paragraph("Nature des prestations : décapage et évacuation.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_anchor_choice")
+
+        self.assertEqual(lot["perimeter"]["anchor_code"], "2")
+        designations = {line["designation"] for line in lot["lines"]}
+        self.assertIn("Constat d'huissier", designations)
+        self.assertIn("Décapage de terre végétale", designations)
+        self.assertNotIn("Contenu du prix", designations)
+
+    def test_guessed_unit_is_flagged_in_every_lot_family(self) -> None:
+        # Le signalement "Unité de métré à confirmer" n'existait qu'en
+        # désamiantage/démolition. Ailleurs, une unité posée faute de mieux
+        # ressortait "validée" : sur un dossier réel de 14 lots, 187 unités
+        # devinées sur 343 étaient présentées comme sûres.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 20 - Ascenseurs.docx"
+            document = Document()
+            document.add_heading("LOT 20 — Ascenseurs", level=1)
+            document.add_heading("3 Description des ouvrages", level=1)
+            document.add_heading("3.1 Zorglub télescopique", level=2)
+            document.add_paragraph("Fourniture et pose selon plans.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_flag_default")
+
+        guessed = [
+            line
+            for line in lot["lines"]
+            if line["kind"] == "item" and line["unit_source"] == "default"
+        ]
+        self.assertTrue(guessed, "ce CCTP doit produire au moins une unité par défaut")
+        for line in guessed:
+            self.assertEqual(line["review_status"], "to_review")
+            self.assertIn("Unité", line["review_reason"])
+
     def test_decomposition_rule_adds_flagged_extra_lines(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "CCTP LOT 15 CVC.docx"
@@ -692,6 +902,8 @@ class ExtractionTests(unittest.TestCase):
             self._build_control_trigger_docx(path, "LOT 01 — VRD")
             lot = parse_document(extract_document(path), "src_vrd_control")
 
+        self.assertEqual(classify_lot_family(lot["title"])[0], "vrd")
+        self.assertNotEqual(lot["perimeter"]["method"], "trade_work_anchor")
         designations = [line["designation"] for line in lot["lines"]]
         control_index = designations.index(
             "Contrôle qualité des ouvrages d'assainissement (étanchéité RV)"
@@ -738,6 +950,133 @@ class ExtractionTests(unittest.TestCase):
         # Written explicitly in the CCTP: the rule must not duplicate it.
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0]["origin"], "deterministic-v2")
+
+    def _vrd_lot_with_sections(self, directory: str, *sections: str) -> dict:
+        path = Path(directory) / "CCTP LOT 01 - VRD.docx"
+        document = Document()
+        document.add_heading("LOT 01 — Voirie et Réseaux Divers", level=1)
+        document.add_heading("3 Description des ouvrages", level=1)
+        for index, section in enumerate(sections, start=1):
+            document.add_heading(f"3.{index} {section}", level=2)
+            document.add_heading(f"3.{index}.1 Prestation décrite au CCTP", level=3)
+            document.add_paragraph("Nature des prestations : exécution complète.")
+        document.save(path)
+        return parse_document(extract_document(path), "src_skeleton")
+
+    def test_skeleton_completes_a_chapter_the_cctp_already_covers(self) -> None:
+        # Un CCTP prescrit la manière de faire et renvoie aux plans pour le
+        # détail chiffrable ("les diamètres sont spécifiés sur le plan des
+        # travaux assainissement" — Keolis Charny). Les postes standard du
+        # corps d'état sont ajoutés pour livrer un cadre chiffrable complet,
+        # mais toujours à confirmer et sans extrait source.
+        with tempfile.TemporaryDirectory() as directory:
+            lot = self._vrd_lot_with_sections(directory, "Ouvrages d'assainissement")
+
+        skeleton = [line for line in lot["lines"] if line["origin"] == "skeleton"]
+        self.assertTrue(skeleton, "le squelette VRD doit compléter l'assainissement")
+        designations = {line["designation"] for line in skeleton}
+        self.assertIn("Canalisation diamètre 160 mm PVC SN8", designations)
+        for line in skeleton:
+            self.assertEqual(line["review_status"], "to_review")
+            self.assertIsNone(line["quantity"])
+            self.assertEqual(
+                line["source_excerpt"],
+                "",
+                "une ligne de squelette ne doit jamais prétendre venir du document",
+            )
+
+    def test_skeleton_never_invents_a_chapter_absent_from_the_cctp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lot = self._vrd_lot_with_sections(directory, "Travaux généraux")
+
+        skeleton = {
+            line["designation"]
+            for line in lot["lines"]
+            if line["origin"] == "skeleton"
+        }
+        self.assertIn("Constat d'huissier", skeleton)
+        self.assertNotIn("Canalisation diamètre 160 mm PVC SN8", skeleton)
+        self.assertNotIn("Réglage de fond de forme", skeleton)
+
+    def test_skeleton_does_not_duplicate_a_poste_read_from_the_cctp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CCTP LOT 01 - VRD.docx"
+            document = Document()
+            document.add_heading("LOT 01 — Voirie et Réseaux Divers", level=1)
+            document.add_heading("3 Description des ouvrages", level=1)
+            document.add_heading("3.1 Travaux généraux", level=2)
+            document.add_heading("3.1.1 Constat d'huissier", level=3)
+            document.add_paragraph("Nature des prestations : constat avant travaux.")
+            document.save(path)
+            lot = parse_document(extract_document(path), "src_skeleton_dedup")
+
+        matching = [
+            line
+            for line in lot["lines"]
+            if "constat" in line["designation"].casefold()
+        ]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["origin"], "deterministic-v2")
+
+    def test_vrd_units_follow_the_real_dpgf_vocabulary(self) -> None:
+        # Pureté mesurée sur trois DPGF VRD livrés (376 postes) : "chaussée"
+        # est une surface à 100 %, "tranchée" un linéaire à 100 %, "regard"
+        # une unité à 100 %, et "couche de forme" un volume — contrairement
+        # aux autres couches de chaussée.
+        expectations = {
+            "Nettoyage de la chaussée et couche d'accrochage": "m²",
+            "Démolition de chaussée et trottoir existants": "m²",
+            "Couche de forme en grave non traitée 0/31.5": "m³",
+            "Fourniture et mise en œuvre de BBSG 0/10 pour couche de surface": "m²",
+            "Tranchée 2 réseaux": "ml",
+            "Fourniture et pose de caniveau à fente": "ml",
+            "Fourniture et pose de regard de visite": "U",
+            "Abattage et essouchage d'arbres": "U",
+            "Déplacement de mât d'éclairage": "U",
+            "Décapage de terre végétale et évacuation hors site": "m³",
+        }
+        for designation, expected in expectations.items():
+            with self.subTest(designation=designation):
+                unit, source, _ = parser_module._infer_unit(designation, "", "vrd")
+                self.assertEqual(unit, expected)
+                self.assertEqual(source, "rule")
+
+    def test_forfait_is_written_ft_in_vrd_and_ens_elsewhere(self) -> None:
+        # Les DPGF VRD livrés notent le forfait "Ft" (50 lignes sur 376 ;
+        # "ens" n'y apparaît que 2 fois). Les autres corps d'état gardent
+        # "Ens" : la notation suit le lot, pas l'application.
+        vrd_unit, vrd_source, _ = parser_module._infer_unit(
+            "Raccordement sur le réseau existant", "", "vrd"
+        )
+        self.assertEqual(vrd_unit, "Ft")
+        self.assertEqual(vrd_source, "rule")
+
+        cvc_unit, _, _ = parser_module._infer_unit(
+            "Raccordement sur le réseau existant", "", "cvc"
+        )
+        self.assertEqual(cvc_unit, "Ens")
+
+        # Y compris pour l'unité posée faute de mieux, et pour les corps
+        # d'état sans règle propre.
+        self.assertEqual(parser_module._infer_unit("Zorglub", "", "vrd")[0], "Ft")
+        self.assertEqual(parser_module._infer_unit("Zorglub", "", "peinture")[0], "Ens")
+        self.assertEqual(parser_module._infer_unit("Zorglub", "", None)[0], "Ens")
+
+        # Les unités qui ne sont pas un forfait ne bougent pas.
+        self.assertEqual(
+            parser_module._infer_unit("Tranchée 2 réseaux", "", "vrd")[0], "ml"
+        )
+
+    def test_vrd_skeleton_uses_ft_for_its_forfait_postes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lot = self._vrd_lot_with_sections(directory, "Travaux généraux")
+
+        skeleton = {
+            line["designation"]: line
+            for line in lot["lines"]
+            if line["origin"] == "skeleton"
+        }
+        self.assertEqual(skeleton["Constat d'huissier"]["unit"], "Ft")
 
     def test_lot_family_breaks_ties_when_codes_collide(self) -> None:
         self.assertEqual(classify_lot_family("LOT 03 — ELECTRICITE CFO/CFA")[0], "electricite")

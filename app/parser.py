@@ -26,8 +26,14 @@ LOT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 TOC_PATTERN = re.compile(r"\.{3,}\s*\d+\s*$")
+# Les CCTP réels n'écrivent pas toujours "Description des ouvrages" d'un seul
+# tenant : "DESCRIPTION ET LOCALISATION DES OUVRAGES" (Orchies) intercale deux
+# mots et échappait entièrement à l'ancienne expression, qui n'acceptait que
+# "de"/"du"/"des". On tolère donc jusqu'à trois mots intercalés — le choix
+# entre plusieurs titres ainsi reconnus est fait par _score_anchor, pas par
+# l'ordre d'apparition.
 WORK_ANCHOR = re.compile(
-    r"\b(?:description|descriptif)\s+(?:d[eu']\s+|des\s+)?"
+    r"\b(?:descriptions?|descriptifs?)\b(?:\s+\S+){0,3}?\s+"
     r"(?:ouvrages?|travaux|prestations?)\b",
     re.IGNORECASE,
 )
@@ -482,6 +488,139 @@ DECOMPOSITION_RULES: list[tuple[re.Pattern[str], list[DecompositionChild]]] = [
     ),
 ]
 
+# Une part importante d'un DPGF livré n'est PAS extractible du CCTP : le CCTP
+# prescrit la manière de faire ("les tuyaux seront revêtus de la marque de
+# conformité NF-SP...") et renvoie explicitement aux plans pour le détail
+# chiffrable ("les diamètres sont spécifiés sur le plan des travaux
+# assainissement" — CCTP Keolis Charny). L'économiste, lui, complète avec le
+# squelette standard de son corps d'état.
+#
+# Mesure sur trois DPGF VRD réels de trois projets sans rapport (Orchies,
+# Norauto Limoges, Keolis Charny) : ils partagent 58 à 65 % de leurs lignes,
+# et 26 postes sont présents dans les trois. Le squelette ci-dessous retient
+# les postes vus dans au moins deux projets sur trois, avec leur unité
+# dominante et leur chapitre d'accueil.
+#
+# Ces lignes sont ajoutées avec origin="skeleton", sans extrait source (elles
+# n'ont pas été lues dans le document) et toujours à confirmer : elles servent
+# à livrer un cadre de chiffrage complet, jamais à prétendre avoir lu quelque
+# chose. Et elles ne complètent qu'un chapitre que le CCTP traite déjà — si le
+# lot ne comporte pas d'assainissement, aucun poste d'assainissement n'apparaît.
+SkeletonItem = tuple[str, str]  # (désignation, unité)
+LOT_SKELETONS: dict[str, list[tuple[str, list[SkeletonItem]]]] = {
+    "vrd": [
+        (
+            "Travaux généraux",
+            [
+                (
+                    "Installation de chantier propre au VRD : base vie & entretien, "
+                    "barriérage, balisage et signalisation",
+                    "Ens",
+                ),
+                ("Implantation piquetage, dossier EXE, dossier DOE", "Ens"),
+                ("Constat d'huissier", "Ens"),
+                ("Sondage", "Ens"),
+            ],
+        ),
+        (
+            "Travaux préparatoires",
+            [
+                ("Dépose de clôture existante", "Ens"),
+                ("Dépose de bordure", "ml"),
+            ],
+        ),
+        (
+            "Terrassements",
+            [
+                ("Décapage de terre végétale et évacuation hors site", "m³"),
+                ("Décapage de terre végétale et mise en stock sur site", "m³"),
+                ("Reprise de terre végétale et mise en œuvre sur espaces verts", "m³"),
+                ("Terrassement en déblai évacué hors site", "m³"),
+                ("Plateforme bâtiment", "m²"),
+            ],
+        ),
+        (
+            "Ouvrages d'assainissement",
+            [
+                ("Canalisation diamètre 160 mm PVC SN8", "ml"),
+                ("Canalisation diamètre 200 mm PVC SN8", "ml"),
+                ("Canalisation diamètre 250 mm PVC SN8", "ml"),
+                ("Canalisation diamètre 315 mm PVC SN8", "ml"),
+                ("Regard de branchement 60x60 avec fonte B125", "U"),
+                ("Reprise de descente d'eau pluviale", "U"),
+                ("Reprise des sorties en pied de bâtiment", "U"),
+                ("Raccordement à l'existant", "Ens"),
+                ("Contrôle qualité du niveau de compactage", "Ens"),
+                (
+                    "Contrôle qualité des collecteurs d'assainissement "
+                    "(curage, étanchéité, ITV)",
+                    "Ens",
+                ),
+                (
+                    "Contrôle qualité des ouvrages d'assainissement (étanchéité RV)",
+                    "Ens",
+                ),
+            ],
+        ),
+        (
+            "Voirie",
+            [
+                ("Réglage de fond de forme", "m²"),
+                ("Géotextile classe V", "m²"),
+                ("Couche de forme en grave non traitée 0/31.5", "m³"),
+                (
+                    "Fourniture et mise en œuvre de BBSG 0/10 pour couche de surface",
+                    "m²",
+                ),
+                (
+                    "Nettoyage de la chaussée et réalisation d'une couche d'accrochage",
+                    "m²",
+                ),
+                ("Bordure béton type T1 (y compris partie adoucie)", "ml"),
+                ("Bordure béton type CS1", "ml"),
+                ("Mise à niveau des ouvrages existants", "U"),
+                ("Marquage normalisé place PMR", "U"),
+                ("Marquage normalisé place électrique", "U"),
+                ("Marquage bande STOP", "m²"),
+                ("Marquage zébra", "m²"),
+                ("Flèche directionnelle", "U"),
+                ("F&P de panneau AB4 « STOP »", "Ens"),
+                (
+                    "F&P de panneau véhicule électrique + 2 panonceaux M3a1",
+                    "Ens",
+                ),
+                ("Contrôle qualité de la couche de forme", "Ens"),
+                (
+                    "Contrôle qualité des enrobés : contrôle de densité, "
+                    "carottage pour contrôle des épaisseurs",
+                    "Ens",
+                ),
+            ],
+        ),
+        (
+            "Réseaux divers",
+            [
+                ("Tranchée 1 réseau", "ml"),
+                ("Tranchée 2 réseaux", "ml"),
+                ("Fourniture et pose de fourreau PVC 42/45 aiguillé", "ml"),
+                ("Fourniture et pose de gaine janolène DN60 rouge", "ml"),
+                ("Fourreau DN63 vert", "ml"),
+                ("Fourreau DN90 rouge", "ml"),
+                ("Fourreau DN160", "ml"),
+                ("Fourniture et pose de câble de mise à la terre CU25²", "ml"),
+                ("Chambre de tirage type L1T", "U"),
+                ("Chambre de tirage 40 x 40 cm avec fonte B125", "U"),
+                ("Chambre de tirage 80 x 80 cm avec fonte C250", "U"),
+                ("Fourniture et pose de fosse à compteur", "U"),
+                ("Réalisation des massifs et finition autour du pied de mâts", "U"),
+                ("Réalisation des massifs et finition autour du pied de borne", "U"),
+                ("Contrôle qualité de compactage", "Ens"),
+            ],
+        ),
+    ],
+}
+
+
 # Certains mots sont ambigus au global (câblage, câbles, réseau, canalisation
 # ne dépassent pas 60 % de pureté sur l'unité tous lots confondus) mais
 # deviennent fiables une fois qu'on sait de quel corps d'état vient le lot :
@@ -490,11 +629,73 @@ DECOMPOSITION_RULES: list[tuple[re.Pattern[str], list[DecompositionChild]]] = [
 # électricité/CVC (un forfait de câblage). Ces règles priment sur UNIT_RULES
 # quand le lot est classé et que le mot y est effectivement pur.
 FAMILY_UNIT_OVERRIDES: dict[str, list[tuple[str, float, re.Pattern[str]]]] = {
+    # Minage 2026 sur trois couples CCTP/DPGF VRD réels et indépendants
+    # (Orchies, Norauto Limoges, Keolis Charny — 376 postes livrés) : pureté
+    # de l'unité par mot normalisé, entrées retenues à ≥ 75 % de pureté et
+    # présentes dans au moins deux projets. L'ordre compte, la première
+    # expression qui correspond l'emporte : les exceptions ouvrent la liste.
     "vrd": [
+        # "Modelage des noues paysagères" est une surface, alors que
+        # "Remodelage de fossé" plus bas est un linéaire : le mot le plus
+        # spécifique doit passer en premier.
+        ("m²", 0.8, re.compile(r"\bnoues?\b", re.IGNORECASE)),
+        # "Couche de forme en grave non traitée 0/31.5" se règle au volume
+        # (grave : 100 % m³ sur les 3 projets), contrairement à toutes les
+        # autres couches de chaussée qui se règlent à la surface.
+        ("m³", 0.9, re.compile(r"couches? de forme", re.IGNORECASE)),
+        # "Fosse d'arbre" (un contenant, à l'unité) contre "fossé" (un
+        # linéaire) : après normalisation les deux s'écrivent "fosse".
+        ("U", 0.85, re.compile(r"\bfosses?\s+d'?\s*arbres?", re.IGNORECASE)),
+        (
+            "m³",
+            0.85,
+            re.compile(
+                r"gestion des terres|\bisdnd\b|\bisdi\b|decapage|"
+                r"bassin.{0,30}(?:tamponnement|caissons)|tamponnement",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "U",
+            0.85,
+            re.compile(
+                r"mise a niveau|abat+ages?|essouchages?|\bmats?\b|"
+                r"massifs?\b|potence|separateurs? a hydrocarbures|"
+                r"reprises? de sorties?|sorties? en pied|en pied de batiment|"
+                r"descentes? d'?\s*eau\s+pluviale|regards?\b|"
+                r"\bfontes?\b|\bb125\b|\bc250\b|\bd400\b",
+                re.IGNORECASE,
+            ),
+        ),
         (
             "ml",
             0.9,
-            re.compile(r"\b(?:canalisations?|cables?|cablage)\b", re.IGNORECASE),
+            re.compile(
+                r"\b(?:canalisations?|cables?|cablage|caniveaux?|tranchees?|"
+                r"fourreaux?|gaines?|voliges?)\b|busages?|remodelages?|"
+                r"\bdn\s?\d+\b",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "m²",
+            0.88,
+            re.compile(
+                r"\bchaussees?\b|\btrottoirs?\b|\bvoiries?\b|\bplateformes?\b|"
+                r"couches? d'?\s*(?:assise|accrochage|cure)|couches? de surface|"
+                r"\bbbsg\b|\bbbme\b|\bbb\s*0/|enrobes?\b|grave[\s-]bitume|"
+                r"bandes? sterile",
+                re.IGNORECASE,
+            ),
+        ),
+        # "Étanchéité" est une surface partout ailleurs (règle générique m²),
+        # mais en VRD le mot n'apparaît que dans les contrôles qualité de
+        # réseau ("Contrôle qualité des ouvrages d'assainissement (étanchéité
+        # RV)"), facturés au forfait : 100 % sur les 3 projets.
+        (
+            "Ens",
+            0.85,
+            re.compile(r"\bcompactages?\b|\betancheites?\b", re.IGNORECASE),
         ),
     ],
     "electricite": [
@@ -542,9 +743,47 @@ FAMILY_UNIT_OVERRIDES: dict[str, list[tuple[str, float, re.Pattern[str]]]] = {
     ],
     "desamiantage_demolition": [
         (
+            "m²",
+            0.9,
+            re.compile(
+                r"colle bitumineuse|dalles? de sol|plaques? (?:en )?fibres?[ -]?ciment|"
+                r"cloisons?|doublages?|revetements? (?:de sol|muraux?)|"
+                r"faux plafonds?",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "ml",
+            0.88,
+            re.compile(r"conduits?.*fibres?[ -]?ciment", re.IGNORECASE),
+        ),
+        (
+            "U",
+            0.86,
+            re.compile(r"menuiseries? (?:interieures?|exterieures?)", re.IGNORECASE),
+        ),
+        (
+            "m³",
+            0.84,
+            re.compile(
+                r"massifs?|socles?|recharges? beton|dechets? et gravats",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "PM",
+            0.95,
+            re.compile(r"compte prorata", re.IGNORECASE),
+        ),
+        (
             "Ens",
-            0.75,
-            re.compile(r"\b(?:reseau|cables?|cablage|canalisations?)\b", re.IGNORECASE),
+            0.78,
+            re.compile(
+                r"\b(?:reseaux?|cables?|cablage|canalisations?|base vie|"
+                r"neutralisation|metallerie|serrurerie|elements? (?:en toiture|"
+                r"en facade)|batiment complet)\b",
+                re.IGNORECASE,
+            ),
         ),
     ],
     # Les 6 blocs suivants viennent du même minage réel à grande échelle que
@@ -939,20 +1178,44 @@ def _canonical_unit(value: str) -> str:
     return "Ens"
 
 
+# Le poste au forfait ne s'écrit pas de la même façon selon le corps d'état.
+# Les DPGF VRD réellement livrés (Orchies, Norauto Limoges, Keolis Charny) le
+# notent "Ft" : 50 lignes sur 376, alors que "ens" n'y apparaît que 2 fois.
+# Les autres corps d'état conservent "Ens".
+FAMILY_FORFAIT_UNIT = {"vrd": "Ft"}
+
+
+def family_unit(unit: str, lot_family: str | None) -> str:
+    """Notation du poste au forfait propre au corps d'état (voir
+    FAMILY_FORFAIT_UNIT). Exposée pour l'assistance LIHA, qui répond dans la
+    nomenclature générique."""
+    return _family_unit(unit, lot_family)
+
+
+def _family_unit(unit: str, lot_family: str | None) -> str:
+    if unit != "Ens":
+        return unit
+    return FAMILY_FORFAIT_UNIT.get(lot_family or "", "Ens")
+
+
 def _infer_unit(
     title: str, context: str, lot_family: str | None = None
 ) -> tuple[str, str, float]:
     explicit = EXPLICIT_UNIT.search(f"{title}. {context[:500]}")
     if explicit:
-        return _canonical_unit(explicit.group("unit")), "explicit", 0.99
+        return (
+            _family_unit(_canonical_unit(explicit.group("unit")), lot_family),
+            "explicit",
+            0.99,
+        )
     normalized_title = _normalized(title)
     for unit, confidence, pattern in FAMILY_UNIT_OVERRIDES.get(lot_family or "", []):
         if pattern.search(normalized_title):
-            return unit, "rule", confidence
+            return _family_unit(unit, lot_family), "rule", confidence
     for unit, confidence, pattern in UNIT_RULES:
         if pattern.search(normalized_title):
-            return unit, "rule", confidence
-    return "Ens", "default", 0.62
+            return _family_unit(unit, lot_family), "rule", confidence
+    return _family_unit("Ens", lot_family), "default", 0.62
 
 
 def _infer_quantity(title: str, context: str) -> tuple[float | None, str]:
@@ -973,28 +1236,68 @@ def _stable_id(source_id: str, code: str, title: str, index: int) -> str:
     return f"ln_{digest[:14]}"
 
 
-def _lot_identity(document: ExtractedDocument) -> tuple[str, str]:
-    beginning = "\n".join(block.text for block in document.blocks[:160])
-    match = LOT_PATTERN.search(beginning)
-    if match:
-        code = match.group("code").upper()
-        if code.isdigit() and len(code) < 2:
-            code = code.zfill(2)
-        title = re.sub(
-            r"^\s*CCTP\s+", "", _clean_title(match.group("title")), flags=re.IGNORECASE
-        )
-        return code, title
-    stem = re.sub(r"(?i)\bCCTP\b", "", document.path.stem)
+def _pad_lot_code(code: str) -> str:
+    code = str(code or "").upper()
+    return code.zfill(2) if code.isdigit() and len(code) < 2 else code
+
+
+_FILENAME_LOT = re.compile(
+    r"\bLOT\s*(?:N[°O]\s*)?(?P<code>[A-Z]?\d{1,3}(?:[.\-]\d+)?)", re.IGNORECASE
+)
+
+
+def _filename_identity(path) -> tuple[str, str]:
+    """Code et intitulé lus dans le nom du fichier.
+
+    Le nom du fichier est choisi par celui qui monte le DCE et désigne le lot
+    qu'il contient ; il ment beaucoup moins que la page de garde, qui est
+    régulièrement héritée d'un autre lot par copie de gabarit."""
+    stem = re.sub(r"(?i)\bCCTP\b", "", path.stem)
     stem = re.sub(r"[_\-]+", " ", stem)
     stem = re.sub(r"\s+", " ", stem).strip()
-    code_match = re.search(
-        r"\b(?:LOT\s*)?([A-Z]?\d{1,3}(?:[.\-]\d+)?)\b", stem, re.IGNORECASE
-    )
-    code = code_match.group(1).upper() if code_match else ""
-    if code.isdigit() and len(code) < 2:
-        code = code.zfill(2)
-    title = stem or document.path.stem
-    return code, title[:100]
+    match = _FILENAME_LOT.search(stem)
+    if not match:
+        return "", stem[:100]
+    title = _clean_title(stem[match.end() :])
+    return _pad_lot_code(match.group("code")), title[:100]
+
+
+def _lot_identity(document: ExtractedDocument) -> tuple[str, str, list[str]]:
+    """Identifie le lot, en arbitrant entre la page de garde et le nom du
+    fichier. Retourne (code, intitulé, avertissements).
+
+    Cas réel qui impose cet arbitrage : un « CCTP LOT 03 - Clôtures et
+    portails » monté en copiant le gabarit du lot VRD garde en page de garde
+    « CCTP Lot n°02 – Voirie et Réseaux Divers ». En faisant confiance au
+    texte, le lot était classé en famille "vrd" et recevait des règles d'unité
+    qui n'ont rien à voir avec des clôtures — sans le moindre signalement."""
+    warnings: list[str] = []
+    file_code, file_title = _filename_identity(document.path)
+
+    beginning = "\n".join(block.text for block in document.blocks[:160])
+    match = LOT_PATTERN.search(beginning)
+    text_code, text_title = "", ""
+    if match:
+        text_code = _pad_lot_code(match.group("code"))
+        text_title = re.sub(
+            r"^\s*CCTP\s+", "", _clean_title(match.group("title")), flags=re.IGNORECASE
+        )
+
+    if file_code and text_code and file_code != text_code:
+        # Désaccord : le nom du fichier fait foi, et l'intitulé de la page de
+        # garde est écarté avec lui — il décrit l'autre lot.
+        warnings.append(
+            f"Le nom du fichier annonce le lot {file_code} alors que le document "
+            f"mentionne le lot {text_code} « {text_title} ». Le lot {file_code} a "
+            "été retenu : vérifier l'intitulé et les unités."
+        )
+        return file_code, (file_title or text_title)[:100], warnings
+
+    if text_code:
+        return text_code, text_title, warnings
+    if file_code:
+        return file_code, file_title, warnings
+    return "", (text_title or file_title or document.path.stem)[:100], warnings
 
 
 @dataclass
@@ -1106,6 +1409,20 @@ def _synthesize_style_candidates(
 ) -> list[HeadingCandidate]:
     candidates: list[HeadingCandidate] = []
     counters = [0] * 8
+    usable_levels = [
+        level
+        for block in blocks
+        if block.page not in ignored_pages
+        and not TOC_PATTERN.search(block.text.strip())
+        and not LOT_PATTERN.search(block.text.strip())
+        and (level := _style_heading_level(block.style)) is not None
+    ]
+    # Some real Word CCTP start every visible chapter at Heading 2 because
+    # the document template reserves Heading 1 for a chapter that is not
+    # present in the file. Keeping the literal level produces impossible
+    # synthetic codes such as 0.1, 0.2, ... and makes the whole document look
+    # like one chapter. Promote the shallowest style to level 1 instead.
+    level_shift = max(0, min(usable_levels, default=1) - 1)
     for index, block in enumerate(blocks):
         text = block.text.strip()
         if (
@@ -1119,6 +1436,7 @@ def _synthesize_style_candidates(
         level = _style_heading_level(block.style)
         if level is None:
             continue
+        level = max(1, level - level_shift)
         title = _clean_title(text)
         if len(title) < 2:
             continue
@@ -1141,9 +1459,35 @@ def _synthesize_style_candidates(
     return candidates
 
 
+def _score_anchor(
+    candidates: list[HeadingCandidate], anchor: HeadingCandidate
+) -> int:
+    """Nombre de titres réellement détaillés qu'ouvre cette ancre.
+
+    On ne compte que les descendants strictement plus profonds que l'ancre et
+    situés après elle dans le document : c'est ce qui distingue un chapitre
+    descriptif ("2 DESCRIPTION ET LOCALISATION DES OUVRAGES" et ses 79
+    sous-titres chiffrables) d'un chapitre administratif portant un intitulé
+    voisin ("1 CONSISTANCE ET DESCRIPTION DES TRAVAUX" et ses 6 paragraphes
+    d'objet et de contenu du prix)."""
+    parts = _code_parts(anchor.code)
+    if not parts:
+        return 0
+    prefix = parts[0]
+    return sum(
+        1
+        for candidate in candidates
+        if candidate.block_index > anchor.block_index
+        and candidate.level > anchor.level
+        and _code_parts(candidate.code)
+        and _code_parts(candidate.code)[0] == prefix
+    )
+
+
 def _select_work_perimeter(
     candidates: list[HeadingCandidate],
     forced_anchor_code: str | None = None,
+    lot_family: str | None = None,
 ) -> tuple[list[HeadingCandidate], dict[str, Any]]:
     if forced_anchor_code:
         normalized_code = _normalize_code(forced_anchor_code)
@@ -1167,15 +1511,72 @@ def _select_work_perimeter(
                 "confidence": 0.9,
             }
 
+    if lot_family == "desamiantage_demolition":
+        # Demolition CCTP often have no explicit "Description des ouvrages"
+        # chapter. Their commercial scope starts at the site setup, followed
+        # by asbestos removal, strip-out and demolition. Everything before it
+        # is administrative/technical prescription and must not become a DPGF
+        # row. Prefer the site setup; fall back to the first actual works
+        # heading when a shorter document omits it.
+        trade_anchors = [
+            candidate
+            for candidate in candidates
+            if re.match(
+                r"^(?:installation de chantier|travaux de (?:desamiantage|"
+                r"curage|deconstruction|demolition))\b",
+                _normalized(candidate.title),
+            )
+        ]
+        if trade_anchors:
+            anchor = next(
+                (
+                    candidate
+                    for candidate in trade_anchors
+                    if _normalized(candidate.title) == "installation de chantier"
+                ),
+                trade_anchors[0],
+            )
+            selected = [
+                candidate
+                for candidate in candidates
+                if candidate.block_index >= anchor.block_index
+            ]
+            return selected, {
+                "method": "trade_work_anchor",
+                "anchor_code": anchor.code,
+                "anchor_title": anchor.title,
+                "start_page": anchor.page,
+                "confidence": 0.96,
+            }
+
     anchors = [
         candidate for candidate in candidates if WORK_ANCHOR.search(candidate.title)
     ]
     if anchors:
-        anchor = anchors[0]
+        # Plusieurs titres peuvent contenir "description des travaux" : un
+        # chapitre administratif d'ouverture ("1 CONSISTANCE ET DESCRIPTION DES
+        # TRAVAUX", qui n'annonce que l'objet et le contenu du prix) et le vrai
+        # chapitre descriptif plus loin. Prendre le premier, comme avant,
+        # sélectionnait le chapitre administratif et jetait tout l'ouvrage :
+        # sur le couple Orchies cela produisait 1 poste au lieu de 50, avec une
+        # confiance affichée de 0,98. On classe donc les ancres par la richesse
+        # du chapitre qu'elles ouvrent, pas par leur position.
+        scored_anchors = sorted(
+            (
+                (_score_anchor(candidates, anchor), index, anchor)
+                for index, anchor in enumerate(anchors)
+            ),
+            key=lambda item: (-item[0], item[1]),
+        )
+        best_score, _, anchor = scored_anchors[0]
+        # Un CCTP peut légitimement décrire ses ouvrages sur plusieurs
+        # chapitres de même niveau (un par réseau, par exemple) : on garde les
+        # autres ancres de richesse comparable, on n'écarte que les chapitres
+        # nettement plus pauvres.
         anchor_prefixes = {
             _code_parts(candidate.code)[0]
-            for candidate in anchors
-            if _code_parts(candidate.code)
+            for score, _, candidate in scored_anchors
+            if _code_parts(candidate.code) and score >= best_score * 0.6
         }
         selected = [
             candidate
@@ -1337,7 +1738,7 @@ def _apply_decomposition_rules(
                     "code": "",
                     "designation": child_designation,
                     "description": "",
-                    "unit": child_unit,
+                    "unit": _family_unit(child_unit, lot_family),
                     "unit_source": "rule",
                     "unit_confidence": 0.75,
                     "quantity": None,
@@ -1365,6 +1766,111 @@ def _apply_decomposition_rules(
     return expanded
 
 
+_SIGNATURE_STOPWORDS = {
+    "de", "du", "des", "le", "la", "les", "un", "une", "et", "en", "a", "au",
+    "aux", "pour", "sur", "par", "avec", "d", "l", "ou", "y", "compris",
+}
+
+
+def _signature(value: str) -> frozenset[str]:
+    words = re.findall(r"[a-z0-9]+", _normalized(value))
+    return frozenset(
+        word for word in words if len(word) > 1 and word not in _SIGNATURE_STOPWORDS
+    )
+
+
+def _signature_overlap(left: frozenset[str], right: frozenset[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _apply_lot_skeleton(
+    lines: list[dict[str, Any]], source_id: str, lot_family: str | None
+) -> list[dict[str, Any]]:
+    """Complète chaque chapitre déjà présent avec les postes standard du corps
+    d'état qui manquent, pour livrer un cadre de chiffrage utilisable.
+
+    Deux garde-fous : on ne crée jamais un chapitre que le CCTP n'aborde pas
+    (pas d'assainissement inventé sur un lot qui n'en comporte pas), et un
+    poste déjà extrait du document n'est jamais dupliqué."""
+    skeleton = LOT_SKELETONS.get(lot_family or "")
+    if not skeleton or not lines:
+        return lines
+
+    existing = [_signature(str(line.get("designation") or "")) for line in lines]
+    result = list(lines)
+    added = 0
+
+    for section_title, items in skeleton:
+        section_signature = _signature(section_title)
+        # Le chapitre d'accueil doit exister dans le document : on le cherche
+        # parmi les sections extraites, du plus proche au moins proche.
+        anchor_position, anchor_score = -1, 0.0
+        for position, line in enumerate(result):
+            if line.get("kind") != "section":
+                continue
+            score = _signature_overlap(
+                section_signature, _signature(str(line.get("designation") or ""))
+            )
+            if score > anchor_score:
+                anchor_position, anchor_score = position, score
+        if anchor_position < 0 or anchor_score < 0.5:
+            continue
+
+        anchor = result[anchor_position]
+        anchor_level = int(anchor.get("level") or 1)
+        # Fin du chapitre : la première ligne de niveau égal ou supérieur.
+        insert_at = len(result)
+        for position in range(anchor_position + 1, len(result)):
+            if int(result[position].get("level") or 1) <= anchor_level:
+                insert_at = position
+                break
+
+        pending: list[dict[str, Any]] = []
+        for designation, unit in items:
+            signature = _signature(designation)
+            if any(
+                _signature_overlap(signature, other) >= 0.6 for other in existing
+            ):
+                continue
+            existing.append(signature)
+            added += 1
+            pending.append(
+                {
+                    "id": _stable_id(source_id, "skeleton", designation, added),
+                    "kind": "item",
+                    "level": anchor_level + 1,
+                    "code": "",
+                    "designation": designation,
+                    "description": "",
+                    "unit": _family_unit(unit, lot_family),
+                    "unit_source": "skeleton",
+                    "unit_confidence": 0.7,
+                    "quantity": None,
+                    "quantity_source": "missing",
+                    "unit_price": None,
+                    "included": True,
+                    "confidence": 0.45,
+                    "review_status": "to_review",
+                    "review_reason": (
+                        "Poste standard du corps d'état, absent du CCTP — "
+                        "à confirmer et à quantifier"
+                    ),
+                    "review_fields": ["quantity"],
+                    "source_id": source_id,
+                    "source_page": None,
+                    # Pas d'extrait : cette ligne n'a pas été lue dans le
+                    # document et ne doit jamais prétendre le contraire.
+                    "source_excerpt": "",
+                    "origin": "skeleton",
+                }
+            )
+        result[insert_at:insert_at] = pending
+
+    return result
+
+
 def _build_candidates(document: ExtractedDocument) -> list[HeadingCandidate]:
     ignored_pages = _toc_pages(document.blocks)
     all_candidates = _all_numbered_candidates(document.blocks, ignored_pages)
@@ -1373,6 +1879,156 @@ def _build_candidates(document: ExtractedDocument) -> list[HeadingCandidate]:
         if style_candidates:
             all_candidates = style_candidates
     return all_candidates
+
+
+_DEMOLITION_NATURE_MARKER = re.compile(
+    r"^nature des? prestations?\s*:?$", re.IGNORECASE
+)
+_DEMOLITION_INSTALLATION_ITEMS = re.compile(
+    r"^(?:base vie|neutralisation des reseaux)", re.IGNORECASE
+)
+
+
+def _augment_demolition_candidates(
+    document: ExtractedDocument, candidates: list[HeadingCandidate]
+) -> list[HeadingCandidate]:
+    """Recover priceable demolition rows written as plain Word paragraphs.
+
+    The source pattern is stable and traceable: an item title immediately
+    precedes "Nature des prestations", while asbestos materials are listed
+    after the "Localisation" marker. Only this lot family uses the recovery
+    pass, so ordinary narrative paragraphs in other trades remain untouched.
+    """
+    if not candidates:
+        return candidates
+
+    augmented = list(candidates)
+    existing_blocks = {candidate.block_index for candidate in candidates}
+    for position, parent in enumerate(candidates):
+        parent_title = _normalized(parent.title)
+        boundary = (
+            candidates[position + 1].block_index
+            if position + 1 < len(candidates)
+            else len(document.blocks)
+        )
+        child_blocks: list[int] = []
+
+        if parent_title == "installation de chantier":
+            child_blocks.extend(
+                index
+                for index in range(parent.block_index + 1, boundary)
+                if _DEMOLITION_INSTALLATION_ITEMS.search(
+                    _normalized(document.blocks[index].text)
+                )
+            )
+
+        if parent_title in {"travaux de curage", "travaux de deconstruction"}:
+            for index in range(parent.block_index + 1, boundary - 1):
+                if _DEMOLITION_NATURE_MARKER.match(
+                    _normalized(document.blocks[index + 1].text)
+                ):
+                    child_blocks.append(index)
+
+        if parent_title == "travaux de desamiantage":
+            after_localisation = False
+            for index in range(parent.block_index + 1, boundary):
+                block = document.blocks[index]
+                normalized = _normalized(block.text).rstrip(" :")
+                if normalized == "localisation":
+                    after_localisation = True
+                    continue
+                if after_localisation and block.style.strip().casefold() == "default":
+                    child_blocks.append(index)
+
+        seen_titles: set[str] = set()
+        child_number = 0
+        for block_index in child_blocks:
+            if block_index in existing_blocks:
+                continue
+            block = document.blocks[block_index]
+            title = _clean_title(block.text)
+            title_key = _normalized(title)
+            if len(title) < 3 or title_key in seen_titles:
+                continue
+            seen_titles.add(title_key)
+            child_number += 1
+            augmented.append(
+                HeadingCandidate(
+                    block_index=block_index,
+                    code=f"{parent.code}.{child_number}",
+                    title=title,
+                    level=parent.level + 1,
+                    page=block.page,
+                    source_kind=block.source_kind,
+                    font_size=block.font_size,
+                    bold=block.bold,
+                )
+            )
+            existing_blocks.add(block_index)
+
+    return sorted(augmented, key=lambda candidate: candidate.block_index)
+
+
+def _drop_without_object_candidates(
+    document: ExtractedDocument, candidates: list[HeadingCandidate]
+) -> list[HeadingCandidate]:
+    """Remove headings whose first source paragraph explicitly says no scope."""
+    retained: list[HeadingCandidate] = []
+    for position, candidate in enumerate(candidates):
+        boundary = (
+            candidates[position + 1].block_index
+            if position + 1 < len(candidates)
+            else len(document.blocks)
+        )
+        first_content_index = candidate.block_index + 1
+        if first_content_index < boundary and (
+            _normalized(document.blocks[first_content_index].text).rstrip(" .")
+            == "sans objet"
+        ):
+            continue
+        retained.append(candidate)
+    return retained
+
+
+def _renumber_demolition_work_candidates(
+    candidates: list[HeadingCandidate], root_code: str = "3"
+) -> list[HeadingCandidate]:
+    """Rebase recovered demolition work under the DPGF chapter 3.
+
+    Word's source numbering is unavailable in this template, so its original
+    Heading 2 positions (29, 30, 32...) are document-order counters, not DPGF
+    codes. Once the administrative scope and "Sans objet" chapters have been
+    removed, rebuild a compact hierarchy: 3.1, 3.1.1, 3.2, 3.2.1, ...
+    """
+    if not candidates:
+        return candidates
+    base_level = min(candidate.level for candidate in candidates)
+    counters: list[int] = []
+    renumbered: list[HeadingCandidate] = []
+    for candidate in candidates:
+        relative_level = max(0, candidate.level - base_level)
+        if relative_level == 0:
+            top_number = (counters[0] + 1) if counters else 1
+            counters = [top_number]
+        else:
+            while len(counters) <= relative_level:
+                counters.append(0)
+            counters[relative_level] += 1
+            counters = counters[: relative_level + 1]
+        code = ".".join([root_code, *(str(value) for value in counters)])
+        renumbered.append(
+            HeadingCandidate(
+                block_index=candidate.block_index,
+                code=code,
+                title=candidate.title,
+                level=2 + relative_level,
+                page=candidate.page,
+                source_kind=candidate.source_kind,
+                font_size=candidate.font_size,
+                bold=candidate.bold,
+            )
+        )
+    return renumbered
 
 
 def list_heading_candidates(document: ExtractedDocument) -> list[dict[str, Any]]:
@@ -1392,14 +2048,26 @@ def parse_document(
     source_id: str,
     forced_anchor_code: str | None = None,
 ) -> dict[str, Any]:
-    lot_code, lot_title = _lot_identity(document)
+    lot_code, lot_title, identity_warnings = _lot_identity(document)
     lot_family, _ = classify_lot_family(lot_title)
     ignored_pages = _toc_pages(document.blocks)
     all_candidates = _build_candidates(document)
-    candidates, perimeter = _select_work_perimeter(all_candidates, forced_anchor_code)
+    if lot_family == "desamiantage_demolition":
+        all_candidates = _augment_demolition_candidates(document, all_candidates)
+    candidates, perimeter = _select_work_perimeter(
+        all_candidates, forced_anchor_code, lot_family
+    )
+    if (
+        lot_family == "desamiantage_demolition"
+        and perimeter["method"] == "trade_work_anchor"
+    ):
+        candidates = _drop_without_object_candidates(document, candidates)
+        candidates = _renumber_demolition_work_candidates(candidates)
+        if candidates:
+            perimeter = {**perimeter, "anchor_code": candidates[0].code}
     candidates, conflicting_codes = _deduplicate_candidates(candidates)
     lines: list[dict[str, Any]] = []
-    warnings = list(document.warnings)
+    warnings = list(document.warnings) + identity_warnings
 
     if not candidates:
         warnings.append(
@@ -1427,6 +2095,11 @@ def parse_document(
             " ",
             " ".join(block.text for block in context_blocks),
         ).strip()
+        if any(
+            _normalized(block.text).rstrip(" .") == "sans objet"
+            for block in context_blocks[:1]
+        ):
+            continue
         has_child = (
             index + 1 < len(candidates)
             and candidates[index + 1].level > candidate.level
@@ -1436,6 +2109,7 @@ def parse_document(
         is_anchor = candidate.code == anchor_code and (
             (perimeter["method"] == "explicit_anchor" and WORK_ANCHOR.search(candidate.title))
             or perimeter["method"] == "llm_confirmed_anchor"
+            or perimeter["method"] == "trade_work_anchor"
         )
         # Only "x" and "x.x" codes read as real chapter/sub-chapter titles in
         # a DPGF (e.g. "3" SPECIFICATIONS TECHNIQUES GENERALES, "3.1" TRAVAUX
@@ -1446,11 +2120,21 @@ def parse_document(
         # a "3.4.2 Fourniture et pose de canalisation :" item introducing its
         # own itemised sub-parts) — treating those as titles was producing
         # spurious bold headers instead of a plain, indented item.
-        is_section = (
-            is_anchor
-            or candidate.level <= 1
-            or (has_child and candidate.level == 2)
-        )
+        if (
+            lot_family == "desamiantage_demolition"
+            and perimeter["method"] == "trade_work_anchor"
+        ):
+            # In this source family, orphan Word Heading 2 styles are promoted
+            # to level 1. A leaf at that level is still a priceable item; only
+            # the trade anchor and headings owning recovered children are
+            # structural sections.
+            is_section = bool(is_anchor or has_child)
+        else:
+            is_section = (
+                is_anchor
+                or candidate.level <= 1
+                or (has_child and candidate.level == 2)
+            )
         kind = "section" if is_section else "item"
         if kind == "item" and not is_anchor and _is_generic_administrative_title(
             candidate.title
@@ -1485,6 +2169,16 @@ def parse_document(
         if kind == "item" and float(perimeter["confidence"]) < 0.85:
             review_reasons.append("Périmètre des ouvrages à confirmer")
             confidence -= 0.08
+        if kind == "item" and unit_source == "default":
+            # "default" ne veut pas dire "Ens" : cela veut dire qu'aucune règle
+            # ni aucune mention du CCTP n'a permis de trancher et qu'on a posé
+            # l'unité la plus fréquente faute de mieux. C'était signalé
+            # uniquement en désamiantage/démolition ; ailleurs la ligne
+            # ressortait "validée". Sur un dossier réel de 14 lots cela faisait
+            # 187 unités devinées sur 343 présentées comme sûres, et un indice
+            # de confiance global de 0,90.
+            review_reasons.append("Unité de métré à confirmer")
+            confidence -= 0.08
         confidence = round(max(0.35, min(0.99, confidence)), 2)
         included = not bool(OPTION_PATTERN.search(candidate.title))
         lines.append(
@@ -1516,6 +2210,7 @@ def parse_document(
         )
 
     lines = _apply_decomposition_rules(lines, source_id, lot_family)
+    lines = _apply_lot_skeleton(lines, source_id, lot_family)
 
     item_count = sum(1 for line in lines if line["kind"] == "item")
     if item_count == 0:
@@ -1543,7 +2238,10 @@ def recompute_stats(lots: list[dict[str, Any]]) -> dict[str, Any]:
     trusted_units = [
         line
         for line in items
-        if line.get("unit_source") in {"explicit", "rule"}
+        # "skeleton" compte comme fiable : l'unité vient de DPGF réellement
+        # livrés pour ce corps d'état, au même titre qu'une règle minée. Seul
+        # "default" — l'unité posée faute de mieux — reste hors du compte.
+        if line.get("unit_source") in {"explicit", "rule", "skeleton"}
         or line.get("origin") == "manual"
     ]
     explicit_quantities = [

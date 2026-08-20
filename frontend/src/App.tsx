@@ -60,7 +60,23 @@ import type {
 
 type Route = { name: 'dashboard' } | { name: 'new' } | { name: 'analysis'; id: string };
 
-const UNIT_OPTIONS = ['Ens', 'U', 'ml', 'm²', 'm³', 'kg', 'h', 'mois', 'PM'];
+// "Ft" (forfait) est la notation des DPGF VRD, "Ens" celle des autres corps
+// d'état ; le backend choisit selon le lot, les deux doivent donc être
+// proposées ici.
+const UNIT_OPTIONS = ['Ens', 'Ft', 'U', 'ml', 'm²', 'm³', 'kg', 'h', 'mois', 'PM'];
+
+// Un <select> dont la valeur ne figure pas dans ses options affiche la
+// première option, sans rien signaler : à l'enregistrement suivant, cette
+// valeur d'affichage écrase la vraie donnée. C'est exactement ce qui s'est
+// produit quand le backend s'est mis à produire "Ft" avant que la liste
+// ci-dessus ne le connaisse — 20 unités correctes remplacées par "Ens" au
+// premier enregistrement. Toute unité inconnue est donc ajoutée à la liste
+// plutôt que silencieusement perdue.
+function unitOptionsFor(unit?: string | null): string[] {
+  const current = (unit ?? '').trim();
+  if (!current || UNIT_OPTIONS.includes(current)) return UNIT_OPTIONS;
+  return [current, ...UNIT_OPTIONS];
+}
 
 function readRoute(): Route {
   const match = window.location.pathname.match(/^\/analyses\/([a-f0-9]{32})\/?$/);
@@ -968,7 +984,7 @@ function AnalysisWorkspace({ id, navigate }: { id: string; navigate: (route: Rou
                   {line.review_reason && <small>{line.review_reason}</small>}
                 </div>
                 <select aria-label={`Unité ${line.code || line.designation}`} value={line.unit || 'Ens'} disabled={!canEdit} onChange={(event) => updateLine(line.id, { unit: event.target.value })}>
-                  {UNIT_OPTIONS.map((unit) => <option key={unit}>{unit}</option>)}
+                  {unitOptionsFor(line.unit).map((unit) => <option key={unit}>{unit}</option>)}
                 </select>
                 <input className="number-input" type="number" step="any" value={line.quantity ?? ''} disabled={!canEdit} onChange={(event) => updateLine(line.id, { quantity: event.target.value === '' ? null : Number(event.target.value) })} placeholder="—" />
                 <button
